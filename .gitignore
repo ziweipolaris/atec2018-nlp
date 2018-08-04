@@ -1,0 +1,12 @@
+
+.vscode/
+.ipynb_checkpoints/
+__pycache__/
+data/
+docs/
+GitHubs/
+logs/
+PAI/
+pai_model/
+resources/
+submits/
