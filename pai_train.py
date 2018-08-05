@@ -560,7 +560,7 @@ def r_f1_thresh(y_pred,y_true):
     e[:,0] = y_pred.reshape(-1)
     e[:,1] = y_true
     f = pd.DataFrame(e)
-    m1,m2,fact = 0,100,100
+    m1,m2,fact = 0,1000,1000
     x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
     f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
     return f.corr()[0][1], f1_, thresh
@@ -643,8 +643,6 @@ def train_model(model, cfg):
     data = load_data(dtype, input_length, w2v_length)
     if test_size>0:
         train_x, train_y, test_x, test_y = split_data(data)
-        # train_x, train_y = double_train(train_x, train_y) # 没效果
-        # filepath=model_dir+model_type+"_"+dtype+"-{epoch:02d}-{val_loss:.4f}.h5"
         filepath=model_dir+model_type+"_"+dtype+".h5"
         checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
         earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
@@ -667,107 +665,11 @@ def train_model(model, cfg):
         if pre_epoch:fit(pre_epoch)
         model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
         fit(n_epoch - pre_epoch)
-        # model.load_weights(filepath)
 
-    else:   # 确定训练次数后，不需要earlystop
-        train_x, train_y = data[:-1], data[-1]
-        filepath=model_dir+model_type+"_"+dtype+"_all.h5"
-        history = model.fit(x=train_x, y=train_y,
-            class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
-            batch_size=batch_size, 
-            epochs=n_epoch,verbose=2)
-        model.save_weights(filepath)
     if False and not online:
         import matplotlib.pyplot as plt
         plt.plot(history.history["val_loss"])
         plt.show()
-    return model
-
-
-def train_model_cv(cfg,cv=10):
-    model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg
-    model_file = model_dir+model_type+"_"+dtype+".h5"
-
-    data = load_data(dtype, input_length, w2v_length)
-
-    data, data_test = split_data(data, mode="orig")  # 划分训练和测试
-
-    best_epochs = []
-    val_logs = []
-    kf = KFold(n_splits=cv)     # 划分训练和验证
-    for submodel_index, (train, val) in enumerate(kf.split(data[-1])):
-        train_x, train_y, val_x, val_y = split_data_index(data, train_index = train, test_index = val)
-
-        K.clear_session()
-        model = get_model(cfg)
-        # filepath=model_dir+model_type+"_"+dtype+"-{epoch:02d}-{val_loss:.4f}.h5"
-        filepath=model_dir+model_type+"_"+dtype+"_cv%02d"%(submodel_index)+".h5"
-        checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True,save_weights_only=True, mode='auto')
-        earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=1, mode='auto')
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=1, factor=0.5,patience=plateau_patience, min_lr=1e-5)
-        # train_x, train_y = double_train(train_x, train_y) # 没效果
-        
-        history = model.fit(x=train_x, y=train_y,
-            class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
-            validation_data=((val_x, val_y)),
-            batch_size=batch_size, 
-            callbacks=[checkpoint,reduce_lr,earlystop], 
-            epochs=MAX_EPOCH,verbose=2)
-        model.load_weights(filepath)
-
-        cv_best_epoch = np.array(history.history["val_loss"]).argmin()
-        best_epochs.append(cv_best_epoch + 1)
-        val_logs.append(f1(model, val_x, val_y))
-
-        if model_type!="siamese":
-            os.remove(filepath) # 删除子模型文件
-
-    print(best_epochs)
-    val_logs = np.array(val_logs)
-    best_epoch = int(np.mean(best_epochs))
-    val_log = val_logs.mean(axis=0)
-
-    # 用最好的epoch重新训练
-    train_x, train_y = data[:-1], data[-1]
-
-    K.clear_session()
-    model = get_model(cfg)
-    # filepath=model_dir+model_type+"_"+dtype+"_all.h5"
-    filepath=model_dir+model_type+"_"+dtype+".h5"
-    model.fit(x=train_x, y=train_y,
-        class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
-        batch_size=batch_size, 
-        epochs=best_epoch,verbose=2)
-    model.save_weights(filepath)
-
-    # 测试模型
-    test_x, test_y = data_test[:-1], data_test[-1]
-    test_log = f1(model, test_x, test_y)
-    print(best_epoch, val_log, test_log)
-    return best_epoch, val_log, test_log
-
-
-class Ensemble(object):
-    def __init__(self, cfgs, weights):
-        K.clear_session()
-        self.cfgs = cfgs
-        self.models = [get_model(cfg, weight) for cfg,weight in zip(cfgs,weights)]
-
-    def predict(self,xs,batch_size):
-        y = np.stack([model.predict(x,batch_size=batch_size).reshape(-1) for x,model in zip(xs,self.models)]).mean(axis=0).reshape(-1)
-        return y
-
-    def test(self):
-        train_xs, test_xs = [],[]
-        for index,(model_type, dtype,input_length,w2v_length,n_hidden,n_epoch,patience) in enumerate(self.cfgs):
-            data = load_data(dtype, input_length, w2v_length)
-            train_x, train_y, test_x, test_y = split_data(data)
-            train_xs.append(train_x)
-            test_xs.append(test_x)
-        train_f1 = f1(self, train_xs, y=train_y)
-        test_f1 = f1(self, test_xs, y=test_y)
-        print(train_f1)
-        print(test_f1)
 
 def train_all_models():
     for cfg in cfgs:
@@ -775,22 +677,7 @@ def train_all_models():
         model = get_model(cfg,None)
         train_model(model, cfg)
 
-# test_size = 0 # train_all_models_with_all_data
 train_all_models()
-
-def train_all_models_cv():
-    all_tables = []
-    for cfg in cfgs[4:5]:
-        table = train_model_cv(cfg)
-        all_tables.append(table)
-    print(all_tables)
-# train_all_models_cv()
-
-# ensemble = Ensemble([cfgs[0]]*10,[model_dir + "%s_%s_cv%02d.h5"%(cfgs[0][0],cfgs[0][1],i) for i in range(10)])
-# ensemble.test()
-
-# ensemble = Ensemble([cfgs[1]]*10,[model_dir + "%s_%s_cv%02d.h5"%(cfgs[1][0],cfgs[1][1],i) for i in range(10)])
-# ensemble.test()
 
 def evaluate_models():
     train_y_preds, test_y_preds = [], []
@@ -803,78 +690,21 @@ def evaluate_models():
         train_y_preds.append(model.predict(train_x, batch_size=batch_size).reshape(-1))
         test_y_preds.append(model.predict(test_x, batch_size=batch_size).reshape(-1))
 
-        # 确认对称性
-        # train_x = [train_x[i] for i in [1,0,3,2]] if len(train_x)==4 else train_x[::-1]
-        # test_x  = [test_x[i] for i in [1,0,3,2]]  if len(test_x)==4  else test_x[::-1]
-        # train_y_preds.append(model.predict(train_x, batch_size=batch_size).reshape(-1))
-        # test_y_preds.append(model.predict(test_x, batch_size=batch_size).reshape(-1))
-
     train_y_preds,test_y_preds = np.array(train_y_preds),np.array(test_y_preds)
-    pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],model_dir + "y_pred.pkl")
-    for train_y_pred, test_y_pred  in zip(train_y_preds,test_y_preds):
-        print("train phrase:",r_f1_thresh(train_y_pred, train_y))
-        print("test  phrase:",r_f1_thresh(test_y_pred, test_y))
-
-def update_one_model(index = 2):
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
-    cfg = cfgs[index]
-    weight = weights[index]
-    model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg
-    data = load_data(dtype, input_length, w2v_length)
-    train_x, train_y, test_x, test_y = split_data(data)
-    model = get_model(cfg,weight)
-    train_y_preds[index] = model.predict(train_x, batch_size=batch_size).reshape(-1)
-    test_y_preds[index] = model.predict(test_x, batch_size=batch_size).reshape(-1)
     pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],model_dir + "y_pred.pkl")
 
 def find_out_combine_mean():
     train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
     with open(model_dir + "combine.txt","w",encoding="utf8") as log:
         for cb in combines:
-            train_y_pred, test_y_pred = train_y_preds[cb].mean(axis=0),test_y_preds[cb].mean(axis=0)
-            train_log = r_f1_thresh(train_y_pred, train_y)
+            test_y_pred = test_y_preds[cb].mean(axis=0)
             test_log = r_f1_thresh(test_y_pred, test_y)
             print(cb)
-            print("train phrase:",train_log)
             print("test  phrase:",test_log)
-            log.write("\t".join([str(cb),"\t".join(map(str,train_log)),"\t".join(map(str,test_log))])+"\n")
-
-def find_out_combine_vote():
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
-
-    if not online:
-        train_thresh = [0.0900, 0.1100, 0.1200, 0.1500, 0.1600 ]
-        test_thresh = [0.0900, 0.0900, 0.1000, 0.1400, 0.1600 ]
-    else:
-        train_thresh = [0.2700, 0.2600 ,0.3000 ,0.3300 ,0.2900 ]
-        test_thresh = [0.2500 ,0.2600 ,0.2400 ,0.3100 ,0.2700  ]
-    for cb in combines:
-        train_y_pred, test_y_pred = train_y_preds[cb],test_y_preds[cb]
-        for y_i, cb_i in enumerate(cb):
-            train_y_pred[y_i], test_y_pred[y_i] = train_y_pred[y_i]>train_thresh[cb_i],test_y_pred[y_i]>test_thresh[cb_i]
-        
-        train_y_pred, test_y_pred = train_y_pred.sum(axis=0), test_y_pred.sum(axis=0)
-        train_f1,test_f1 = np.zeros(len(cb)), np.zeros(len(cb))
-        for vote in range(len(cb)):
-            train_f1[vote] = f1_score(train_y_pred > vote, train_y)
-            test_f1[vote]  = f1_score(test_y_pred > vote, test_y)
-
-        print(cb)
-        print("train phrase:",train_f1.max(), train_f1.argmax())
-        print("test  phrase:",test_f1.max(),  test_f1.argmax())
-
-def find_out_combine_lr():
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
-    lr = LogisticRegressionCV()
-    lr.fit(train_y_preds.T,train_y)
-    test_pred = lr.predict(test_y_preds.T)
-    print("test phrase:", f1_score(y_pred=test_pred, y_true=test_y))
+            log.write("\t".join([str(cb),"\t".join(map(str,test_log))])+"\n")
 
 # evaluate_models()
 # find_out_combine_mean()
-
-# find_out_combine_vote()
-# find_out_combine_lr()
 
 def result(df1):
     # to evaluate for the result
