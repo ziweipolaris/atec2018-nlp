@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from itertools import combinations
 from keras.activations import softmax
-from keras.callbacks import EarlyStopping, ModelCheckpoint,LambdaCallback, Callback, ReduceLROnPlateau
+from keras.callbacks import EarlyStopping, ModelCheckpoint,LambdaCallback, Callback, ReduceLROnPlateau, LearningRateScheduler
 from keras.layers import *
 from keras.models import Model
 from keras.optimizers import SGD, Adadelta, Adam, Nadam, RMSprop
@@ -26,34 +26,30 @@ from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split, KFold
 
-
-online = False
-if not online:
-    model_dir = "pai_model/"
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
-def get_optimizer():
-    # optimizer = Adadelta(clipnorm=1.25)
-    # optimizer = SGD(1e-2)
-    optimizer = Adam(lr=1e-3)
-    # optimizer = RMSprop()
-    return optimizer
+online = True
+if not online:
+    model_dir = "pai_model/"
+    test_size = 0.05
+else:
+    test_size = 0.025
 
-test_size = 0.05
+fast_mode, fast_rate = False,0.15    # 快速调试
 random_state = 42
 MAX_LEN = 30
 MAX_EPOCH = 90
 batch_size = 2000
 w2v_length = 256
-earlystop_patience, plateau_patience = 10,2    # patience
+earlystop_patience, plateau_patience = 8,2    # patience
 cfgs = [
-    ("siamese", "char", 24, w2v_length,    [64, 64, 64],   150, earlystop_patience),  # 48s
-    ("siamese", "word", 20, w2v_length,    [80, 64, 64],   163, earlystop_patience),  # 45s
-    ("esim",    "char", 24, w2v_length,    [],             18,  earlystop_patience),  # 394s
-    ("esim",    "word", 20, w2v_length,    [],             18,  earlystop_patience),  # 394s   
-    ("decom",   "char", 24, w2v_length,    [],             87,  earlystop_patience),   # 82s
-    ("decom",   "word", 20, w2v_length,    [],             104, earlystop_patience),  # 69s
-    ("dssm",    "both", [20,24], w2v_length, [],           124, earlystop_patience), # 58s
+    ("siamese", "char", 24, w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
+    ("siamese", "word", 20, w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
+    ("esim",    "char", 24, w2v_length,    [],             18,  earlystop_patience),  # 389s
+    ("esim",    "word", 20, w2v_length,    [],             21,  earlystop_patience),  # 335s   
+    ("decom",   "char", 24, w2v_length,    [],             87-2,  earlystop_patience),   # 84s
+    ("decom",   "word", 20, w2v_length,    [],             104-4, earlystop_patience),  # 71s
+    ("dssm",    "both", [20,24], w2v_length, [],           124-8, earlystop_patience), # 55s
 ]
 weights = [model_dir + "%s_%s.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
 final_weights = [model_dir + "%s_%s_all.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
@@ -207,8 +203,6 @@ def decomposable_attention(pretrained_embedding='../data/fasttext_matrix.npy',
     out_ = Dense(1, activation='sigmoid')(dense)
     
     model = Model(inputs=[q1, q2], outputs=out_)
-    model.compile(optimizer=get_optimizer(), loss='binary_crossentropy', 
-                  metrics=['binary_crossentropy','accuracy'])
     return model
 
 
@@ -262,7 +256,6 @@ def esim(pretrained_embedding='../data/fasttext_matrix.npy',
     out_ = Dense(1, activation='sigmoid')(dense)
     
     model = Model(inputs=[q1, q2], outputs=out_)
-    model.compile(optimizer=get_optimizer(), loss='binary_crossentropy', metrics=['binary_crossentropy','accuracy'])
     return model
 
 def custom_loss(y_true, y_pred):
@@ -310,12 +303,6 @@ def siamese(pretrained_embedding=None,
                             output_shape=lambda x: (x[0][0], 1))([left_output, right_output])
 
     model = Model([left_input, right_input], [malstm_distance])
-
-    # loss = 'mean_squared_error'
-    loss = 'binary_crossentropy'
-    # loss = custom_loss
-
-    model.compile(loss=loss, optimizer=get_optimizer(), metrics=['binary_crossentropy',"accuracy"])
 
     return model
 
@@ -462,7 +449,6 @@ def DSSM(pretrained_embedding, input_length, lstmsize=90):
 
 
     model = Model(inputs=[input1, input2, input1c, input2c], outputs=res)
-    model.compile(optimizer=get_optimizer(), loss="binary_crossentropy",metrics=['binary_crossentropy',"accuracy"])
     return model
     
 def load_data(dtype = "both", input_length=[20,24], w2v_length=300):
@@ -541,6 +527,8 @@ def split_data(data,mode="train", test_size=test_size, random_state=random_state
     train = []
     test = []
     for data_i in data:
+        if fast_mode:
+            data_i, _ = train_test_split(data_i,test_size=1-fast_rate,random_state=random_state )
         train_data, test_data = train_test_split(data_i,test_size=test_size,random_state=random_state )
         train.append(np.asarray(train_data))
         test.append(np.asarray(test_data))
@@ -655,19 +643,30 @@ def train_model(model, cfg):
     data = load_data(dtype, input_length, w2v_length)
     if test_size>0:
         train_x, train_y, test_x, test_y = split_data(data)
+        # train_x, train_y = double_train(train_x, train_y) # 没效果
         # filepath=model_dir+model_type+"_"+dtype+"-{epoch:02d}-{val_loss:.4f}.h5"
         filepath=model_dir+model_type+"_"+dtype+".h5"
-        checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True,save_weights_only=True, mode='auto')
-        earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=1, mode='auto')
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=1, factor=0.8,patience=plateau_patience, min_lr=1e-5)
+        checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
+        earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
+        callbacks = [checkpoint, earlystop]
+        def fit(n_epoch=n_epoch):
+            history = model.fit(x=train_x, y=train_y,
+                class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
+                validation_data=((test_x, test_y)),
+                batch_size=batch_size, 
+                callbacks=callbacks, 
+                epochs=n_epoch,verbose=2)
+            return history
 
-        # train_x, train_y = double_train(train_x, train_y) # 没效果
-        history = model.fit(x=train_x, y=train_y,
-            class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
-            validation_data=((test_x, test_y)),
-            batch_size=batch_size, 
-            callbacks=[reduce_lr,earlystop], 
-            epochs=int(0.9*n_epoch),verbose=2)
+        loss,metrics = 'binary_crossentropy',['binary_crossentropy',"accuracy"]
+ 
+        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
+        callbacks.append(reduce_lr)
+        pre_epoch = int(0.1*n_epoch)
+        model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
+        if pre_epoch:fit(pre_epoch)
+        model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
+        fit(n_epoch - pre_epoch)
         # model.load_weights(filepath)
 
     else:   # 确定训练次数后，不需要earlystop
@@ -705,8 +704,8 @@ def train_model_cv(cfg,cv=10):
         filepath=model_dir+model_type+"_"+dtype+"_cv%02d"%(submodel_index)+".h5"
         checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True,save_weights_only=True, mode='auto')
         earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=1, mode='auto')
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=1, factor=0.3,patience=plateau_patience, min_lr=1e-5)
-       # train_x, train_y = double_train(train_x, train_y) # 没效果
+        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=1, factor=0.5,patience=plateau_patience, min_lr=1e-5)
+        # train_x, train_y = double_train(train_x, train_y) # 没效果
         
         history = model.fit(x=train_x, y=train_y,
             class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
@@ -781,7 +780,7 @@ train_all_models()
 
 def train_all_models_cv():
     all_tables = []
-    for cfg in cfgs[3:4]:
+    for cfg in cfgs[4:5]:
         table = train_model_cv(cfg)
         all_tables.append(table)
     print(all_tables)

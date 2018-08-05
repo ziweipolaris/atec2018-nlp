@@ -1,6 +1,8 @@
 
 import gensim
 import numpy as np
+import jieba_fast as jieba
+
 model_dir = "pai_model/"
 cfgs = [
     ("siamese","char",24,300,[64, 64, 64],90),
@@ -139,17 +141,54 @@ def transform_wiki():
                     if len(doc)>=10:
                         wiki_out.write(title+"|"+doc+"\n")
 
-def transfrom_wiki2ids(dtype):
-    n_tokens = 1000000
-    with open("resources/wiki_corpus/wiki.csv","r",encoding="utf8") as file:
-        train_array, val_array = [],[]
-        with open(model_dir + "lm_train.csv", 'w', encoding="utf8") as train_file:
-            for line in file:
+class WikiChars(object):
+    def __init__(self):
+        pass
+
+    def __iter__(self):
+        with open("resources/wiki_corpus/wiki.csv",'r',encoding="utf8") as wiki:
+            for line in wiki:
                 title, doc = line.strip().split("|")
-                sentenses = doc.split("#")
-                train_file.write()
+                for sentense in doc.split("#"):
+                    if len(sentense)>0:
+                        yield [char for char in sentense if char and 0x4E00<= ord(char[0]) <= 0x9FA5]
+
+class WikiWords(object):
+    def __init__(self):
+        pass
+ 
+    def __iter__(self):
+        with open("resources/wiki_corpus/wiki.csv",'r',encoding="utf8") as wiki:
+            for line in wiki:
+                title, doc = line.strip().split("|")
+                for sentense in doc.split("#"):
+                    if len(sentense)>0:
+                        yield [word for word in list(jieba.cut(sentense)) if word and 0x4E00<= ord(word[0]) <= 0x9FA5]
+
+def transfrom_wiki2ids(dtype):
+    n_tokens = 100000
+    train_array, val_array = [],[]
+    if dtype=="char":
+        wiki = WikiChars()
+    else:
+        wiki = WikiWords()
+
+    with open(model_dir + "lm_%s_train.csv"%dtype, 'w', encoding="utf8") as train_file:
+        length = 0
+        for line in wiki:
+            train_file.write(" ".join(line)+"\n")
+            length += len(line)
+            if length>n_tokens:
+                break
+    with open(model_dir + "lm_%s_valid.csv"%dtype, 'w', encoding="utf8") as valid_file:
+        length = 0
+        for line in wiki:
+            valid_file.write(" ".join(line)+"\n")
+            length += len(line)
+            if length>n_tokens//10:
                 break
 
+def 
 def main():
     # transform_weight(cfgs[0])
     # transform_weight(cfgs[1])
@@ -164,7 +203,8 @@ def main():
     # read_save()
     # transform_wiki()
     # [transform_weight_npy2(cfg,ebed_type) for cfg in cfgs for ebed_type in ["fastskip", "fastcbow"]]
-    transfrom_wiki2ids("char")
+    for dtype in ["char", "word"]:
+        transfrom_wiki2ids(dtype)
 
 if __name__ == '__main__':
     main()
