@@ -19,7 +19,7 @@ from keras.optimizers import SGD, Adadelta, Adam, Nadam, RMSprop
 from keras.regularizers import L1L2, l2
 from keras.preprocessing.sequence import pad_sequences
 from keras.engine.topology import Layer
-#from keras import initializations
+from keras import initializations
 from keras import initializers, regularizers, constraints
 
 from sklearn.linear_model import LogisticRegressionCV
@@ -28,14 +28,14 @@ from sklearn.model_selection import train_test_split, KFold
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
-online = True
+online = False
 if not online:
     model_dir = "pai_model/"
     test_size = 0.05
 else:
     test_size = 0.025
 
-fast_mode, fast_rate = False,0.15    # 快速调试
+fast_mode, fast_rate = False,0.15    # 快速调试，其评分不作为参考
 random_state = 42
 MAX_LEN = 30
 MAX_EPOCH = 90
@@ -580,9 +580,9 @@ def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
         if with_weight:
             if ebed_type == "gensim":
                 if dtype == 'word':
-                    embedding = word_embedding_model.wv.get_keras_embedding()
+                    embedding = word_embedding_model.wv.get_keras_embedding(train_embeddings=True)
                 else:
-                    embedding = char_embedding_model.wv.get_keras_embedding()
+                    embedding = char_embedding_model.wv.get_keras_embedding(train_embeddings=True)
 
             elif ebed_type == "fastskip" or ebed_type == "fastcbow":
                 if dtype == 'word':
@@ -660,11 +660,11 @@ def train_model(model, cfg):
  
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
         callbacks.append(reduce_lr)
-        pre_epoch = int(0.1*n_epoch)
+        pre_epoch = int(100*n_epoch)
         model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
         if pre_epoch:fit(pre_epoch)
-        model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
-        fit(n_epoch - pre_epoch)
+        # model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
+        # fit(n_epoch - pre_epoch)
 
     if False and not online:
         import matplotlib.pyplot as plt
@@ -702,6 +702,13 @@ def find_out_combine_mean():
             print(cb)
             print("test  phrase:",test_log)
             log.write("\t".join([str(cb),"\t".join(map(str,test_log))])+"\n")
+    lines = open(model_dir+'combine.txt','r',encoding='utf8').readlines()
+    lines = [line.strip() for line in lines]
+    for i in range(len(lines)//2+1):
+        if 2*i+1<len(lines):
+            print(lines[2*i]+" xxx "+lines[2*i+1])
+        else:
+            print(lines[2*i])
 
 # evaluate_models()
 # find_out_combine_mean()
