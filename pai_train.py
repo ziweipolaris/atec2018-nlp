@@ -4,8 +4,13 @@
 import multiprocessing
 import os
 import re
+import time
+import json
 import gensim
-import jieba
+try:
+    import jieba_fast as jieba
+except Exception as e:
+    import jieba
 import keras
 import keras.backend as K
 import numpy as np
@@ -19,12 +24,14 @@ from keras.optimizers import SGD, Adadelta, Adam, Nadam, RMSprop
 from keras.regularizers import L1L2, l2
 from keras.preprocessing.sequence import pad_sequences
 from keras.engine.topology import Layer
-from keras import initializations
 from keras import initializers, regularizers, constraints
 
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split, KFold
+
+from gensim.models.word2vec import LineSentence
+from gensim.models.fasttext import FastText
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
@@ -35,21 +42,41 @@ if not online:
 else:
     test_size = 0.025
 
-fast_mode, fast_rate = False,0.15    # 快速调试，其评分不作为参考
+
+w2v_length = 300
+# ebed_type = "gensim"
+ebed_type = "fastcbow"
+
+if ebed_type == "gensim":
+    char_embedding_model = gensim.models.Word2Vec.load(model_dir + "char2vec_gensim%s"%w2v_length)
+    char2index = {v:k for k,v in enumerate(char_embedding_model.wv.index2word)}
+    word_embedding_model = gensim.models.Word2Vec.load(model_dir + "word2vec_gensim%s"%w2v_length)
+    word2index = {v:k for k,v in enumerate(word_embedding_model.wv.index2word)}
+
+elif ebed_type == "fastskip" or ebed_type == "fastcbow":
+    char_fastcbow = FastText.load(model_dir + "char2vec_%s%d"%(ebed_type, w2v_length))
+    char_embedding_matrix = char_fastcbow.wv.vectors
+    char2index = {v:k for k,v in enumerate(char_fastcbow.wv.index2word)}
+    word_fastcbow = FastText.load(model_dir + "word2vec_%s%d"%(ebed_type, w2v_length))
+    word_embedding_matrix = word_fastcbow.wv.vectors
+    word2index = {v:k for k,v in enumerate(word_fastcbow.wv.index2word)}
+
+print("loaded w2v done!", len(char2index), len(word2index))
+
+fast_mode, fast_rate = True,0.01    # 快速调试，其评分不作为参考
 random_state = 42
 MAX_LEN = 30
 MAX_EPOCH = 90
-batch_size = 2000
-w2v_length = 256
-earlystop_patience, plateau_patience = 8,2    # patience
+batch_size = 1000
+earlystop_patience, plateau_patience = 1,2    # patience
 cfgs = [
-    ("siamese", "char", 24, w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
-    ("siamese", "word", 20, w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
-    ("esim",    "char", 24, w2v_length,    [],             18,  earlystop_patience),  # 389s
-    ("esim",    "word", 20, w2v_length,    [],             21,  earlystop_patience),  # 335s   
-    ("decom",   "char", 24, w2v_length,    [],             87-2,  earlystop_patience),   # 84s
-    ("decom",   "word", 20, w2v_length,    [],             104-4, earlystop_patience),  # 71s
-    ("dssm",    "both", [20,24], w2v_length, [],           124-8, earlystop_patience), # 55s
+    ("siamese", "char", 24, ebed_type,  w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
+    ("siamese", "word", 20, ebed_type,  w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
+    ("esim",    "char", 24, ebed_type,  w2v_length,    [],             18,  earlystop_patience),  # 389s
+    ("esim",    "word", 20, ebed_type,  w2v_length,    [],             21,  earlystop_patience),  # 335s   
+    ("decom",   "char", 24, ebed_type,  w2v_length,    [],             87-2,  earlystop_patience),   # 84s
+    ("decom",   "word", 20, ebed_type,  w2v_length,    [],             104-4, earlystop_patience),  # 71s
+    ("dssm",    "both", [20,24], ebed_type,  w2v_length, [],           124-8, earlystop_patience), # 55s
 ]
 weights = [model_dir + "%s_%s.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
 final_weights = [model_dir + "%s_%s_all.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
@@ -64,21 +91,6 @@ for word in new_words:
 
 star = re.compile("\*+")
 
-ebed_type = "gensim"
-
-if ebed_type == "gensim":
-    char_embedding_model = gensim.models.Word2Vec.load(model_dir + "char2vec_gensim%s"%w2v_length)
-    char2index = {v:k for k,v in enumerate(char_embedding_model.wv.index2word)}
-    word_embedding_model = gensim.models.Word2Vec.load(model_dir + "word2vec_gensim%s"%w2v_length)
-    word2index = {v:k for k,v in enumerate(word_embedding_model.wv.index2word)}
-
-elif ebed_type == "fastskip" or ebed_type == "fastcbow":
-    char_embedding_matrix = np.load(model_dir + "fasttext/char2vec_%s%d.npy"%(ebed_type, w2v_length))
-    char2index = {line.split()[0]:int(line.split()[1]) for line in open(model_dir + "fasttext/char2index_%s%d.csv"%(ebed_type, w2v_length),'r',encoding='utf8')}
-    word_embedding_matrix = np.load(model_dir + "fasttext/word2vec_%s%d.npy"%(ebed_type,w2v_length))
-    word2index = {line.split()[0]:int(line.split()[1]) for line in open(model_dir + "fasttext/word2index_%s%d.csv"%(ebed_type, w2v_length),'r',encoding='utf8')}
-
-print("loaded w2v done!", len(char2index), len(word2index))
 
 
 def create_pretrained_embedding(pretrained_weights_path, trainable=False, **kwargs):
@@ -586,11 +598,11 @@ def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
 
             elif ebed_type == "fastskip" or ebed_type == "fastcbow":
                 if dtype == 'word':
-                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[word_embedding_matrix], trainable=False)
+                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[word_embedding_matrix], trainable=True)
                 else:
-                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[char_embedding_matrix], trainable=False)
+                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[char_embedding_matrix], trainable=True)
         else:
-            embedding = Embedding(embedding_length, w2v_length, input_length=input_length)
+            embedding = Embedding(embedding_length, w2v_length, input_length=input_length, trainable=True)
 
         return embedding
 
@@ -611,7 +623,7 @@ def double_train(train_x, train_y):
 def get_model(cfg,model_weights=None):
     print("=======   CONFIG: ", cfg)
 
-    model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg
+    model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
     embedding = get_embedding_layers(dtype, input_length, w2v_length, with_weight=True)
 
     if model_type == "esim":
@@ -638,33 +650,38 @@ def get_model(cfg,model_weights=None):
     return model
 
 def train_model(model, cfg):
-    model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg
+    model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
 
     data = load_data(dtype, input_length, w2v_length)
-    if test_size>0:
-        train_x, train_y, test_x, test_y = split_data(data)
-        filepath=model_dir+model_type+"_"+dtype+".h5"
-        checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
-        earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
-        callbacks = [checkpoint, earlystop]
-        def fit(n_epoch=n_epoch):
-            history = model.fit(x=train_x, y=train_y,
-                class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
-                validation_data=((test_x, test_y)),
-                batch_size=batch_size, 
-                callbacks=callbacks, 
-                epochs=n_epoch,verbose=2)
-            return history
+    train_x, train_y, test_x, test_y = split_data(data)
+    filepath=model_dir+model_type+"_"+dtype+time.strftime("_%m-%d %H-%M-%S")+".h5"   # 每次运行的模型都进行保存，不覆盖之前的结果
+    checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
+    earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
+    callbacks = [checkpoint, earlystop]
+    def fit(n_epoch=n_epoch):
+        history = model.fit(x=train_x, y=train_y,
+            class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
+            validation_data=((test_x, test_y)),
+            batch_size=batch_size, 
+            callbacks=callbacks, 
+            epochs=n_epoch,verbose=2)
+        return history
 
-        loss,metrics = 'binary_crossentropy',['binary_crossentropy',"accuracy"]
- 
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
-        callbacks.append(reduce_lr)
-        pre_epoch = int(100*n_epoch)
-        model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
-        if pre_epoch:fit(pre_epoch)
-        # model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
-        # fit(n_epoch - pre_epoch)
+    loss,metrics = 'binary_crossentropy',['binary_crossentropy',"accuracy"]
+
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
+    callbacks.append(reduce_lr)
+    # pre_epoch = int(100*n_epoch)
+    pre_epoch = 1
+    model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
+    if pre_epoch:fit(pre_epoch)
+    # model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
+    # fit(n_epoch - pre_epoch)
+    configs, jsonfile = {}, model_dir+"all_configs.json"
+    if os.path.exists(jsonfile):
+        configs = json.loads(open(jsonfile,"r",encoding="utf8").read())
+    configs[filepath] = cfg
+    open(jsonfile,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
 
     if False and not online:
         import matplotlib.pyplot as plt
@@ -712,6 +729,23 @@ def find_out_combine_mean():
 
 # evaluate_models()
 # find_out_combine_mean()
+
+def evaluate_models_from_config():
+    """ 根据配置文件计算每个模型的关于验证集的值 """
+    jsonfile = model_dir+"all_configs.json"
+    all_cfgs = json.loads(open(jsonfile,'r',encoding="utf8").read())
+    for weight, cfg in all_cfgs:
+        K.clear_session()
+        model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg        
+        data = load_data(dtype, input_length, w2v_length)
+        train_x, train_y, test_x, test_y = split_data(data)
+        model = get_model(cfg, weight)
+
+def find_out_best_combine():
+    pass
+
+# evaluate_models_from_config()
+# find_out_best_combine()
 
 def result(df1):
     # to evaluate for the result
