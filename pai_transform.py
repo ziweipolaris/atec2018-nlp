@@ -2282,7 +2282,11 @@ def predict_with_targs_(m, dl):
     m.eval()
     if hasattr(m, 'reset'): m.reset()
     res = []
-    for *x,y in iter(dl): res.append([get_prediction(to_np(m(*VV(x)))),to_np(y)])
+    for *x,y in iter(dl): 
+        if len(x)==1:
+            res.append([get_prediction(to_np(m(*VV(x)))),to_np(y)])
+        else:
+            res.append([get_prediction(to_np(m(VV(x)))),to_np(y)])
     return zip(*res)
 
 def predict_with_targs(m, dl):
@@ -3849,8 +3853,169 @@ def repackage_var(h):
     if IS_TORCH_04: return h.detach() if type(h) == torch.Tensor else tuple(repackage_var(v) for v in h)
     else: return Variable(h.data) if type(h) == Variable else tuple(repackage_var(v) for v in h)
 
-def get_rnn_classifier_siamese(bptt, max_seq, n_class, n_tok, emb_sz, n_hid, n_layers, pad_token, layers, drops, bidir=False,
-                      dropouth=0.3, dropouti=0.5, dropoute=0.1, wdrop=0.5, qrnn=False):
+
+
+
+
+
+class Siamese_Baseline(nn.Module):
+    def __init__(self, cfg):
+        super(Siamese_Baseline,self).__init__()
+
+        self.ndir = 1
+        self.n_h = 100
+        self.bs, self.qrnn = 1, False
+        self.shared_lstm = nn.LSTM(400,self.n_h)
+
+    def one_hidden(self):   # 与weights变量在同一个cuda设备上，且数据类型相同
+        return Variable(self.weights.new(self.ndir, self.bs, self.n_h).zero_())
+
+    def reset(self):
+        self.weights = next(self.parameters()).data
+        self.hidden = (self.one_hidden(), self.one_hidden())
+
+    def pool(self, x, bs, is_max):
+        f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
+        return f(x.permute(1,2,0), (1,)).view(bs,-1)
+
+    def forward_once(self, x):
+        sl,bs,_ = x.size()
+        if bs!=self.bs:
+            self.bs=bs
+            self.reset()
+        with set_grad_enabled(self.training):
+            new_hidden = []
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                output, self.hidden = self.shared_lstm(x, self.hidden)
+                self.hidden = tuple(v.detach() for v in self.hidden)
+
+                sl,bs,_ = output.size()
+                avgpool = self.pool(output, bs, False)
+                mxpool = self.pool(output, bs, True)
+                x = torch.cat([output[-1], mxpool, avgpool], 1)
+        return x
+
+    def forward(self, input):
+        l_output, r_output = input
+        with set_grad_enabled(self.training):
+            l_raw_outputs, l_outputs = l_output
+            r_raw_outputs, r_outputs = r_output
+            # print("================")
+            # print(len(l_raw_outputs), len(r_raw_outputs), len(l_outputs), len(r_outputs))
+            # print(l_raw_outputs[0].size(), r_raw_outputs[0].size(), l_outputs[0].size(), r_outputs[0].size())
+            # print(l_raw_outputs[0])
+            # print(r_raw_outputs[0])
+            # print(l_outputs[0])
+            # print(r_outputs[0])
+
+            encoded_left = l_outputs[-1]
+            encoded_right = r_outputs[-1]
+
+            left_output = self.forward_once(encoded_left)
+            right_output = self.forward_once(encoded_right)
+
+            # 距离函数 exponent_neg_manhattan_distance
+            x = [left_output, right_output]
+            malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
+        return malstm_distance.view(-1), l_raw_outputs, l_outputs
+
+
+
+
+
+
+
+class Siamese(nn.Module):
+    def __init__(self, cfg):
+        super(Siamese,self).__init__()
+
+        self.ndir = 1
+        self.n_h = 100
+        self.bs, self.qrnn = 1, False
+        self.shared_lstm = nn.LSTM(400,self.n_h)
+
+    def one_hidden(self):
+        return Variable(self.weights.new(self.ndir, self.bs, self.n_h).zero_())
+
+    def reset(self):
+        self.weights = next(self.parameters()).data
+        self.hidden = (self.one_hidden(), self.one_hidden())
+
+    def pool(self, x, bs, is_max):
+        f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
+        return f(x.permute(1,2,0), (1,)).view(bs,-1)
+
+    def forward_once(self, x):
+        sl,bs,_ = x.size()
+        if bs!=self.bs:
+            self.bs=bs
+        self.reset()
+        with set_grad_enabled(self.training):
+            new_hidden = []
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                output, self.hidden = self.shared_lstm(x, self.hidden)
+                self.hidden = tuple(v.detach() for v in self.hidden)
+
+                sl,bs,_ = output.size()
+                avgpool = self.pool(output, bs, False)
+                mxpool = self.pool(output, bs, True)
+                x = torch.cat([output[-1], mxpool, avgpool], 1)
+        return x
+
+    def forward(self, input):
+        l_output, r_output = input
+        with set_grad_enabled(self.training):
+            l_raw_outputs, l_outputs = l_output
+            r_raw_outputs, r_outputs = r_output
+
+            encoded_left = l_outputs[-1]
+            encoded_right = r_outputs[-1]
+
+            left_output = self.forward_once(encoded_left)
+            right_output = self.forward_once(encoded_right)
+
+            # 距离函数 exponent_neg_manhattan_distance
+            x = [left_output, right_output]
+            malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
+        return malstm_distance.view(-1), l_raw_outputs, l_outputs
+
+
+
+
+
+
+
+class ESIM(nn.Module):
+    """docstring for ESIM"""
+    def __init__(self, cfg):
+        super(ESIM, self).__init__()
+
+    def forward(self, input):
+        l_output, r_output = input
+        with set_grad_enabled(self.training):
+            l_raw_outputs, l_outputs = l_output
+            r_raw_outputs, r_outputs = r_output
+
+            encoded_left = l_outputs[-1]
+            encoded_right = r_outputs[-1]
+
+            left_output = self.forward_once(encoded_left)
+            right_output = self.forward_once(encoded_right)
+
+            # 距离函数 exponent_neg_manhattan_distance
+            x = [left_output, right_output]
+            malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
+        return malstm_distance.view(-1), l_raw_outputs, l_outputs
+
+
+        
+
+
+
+def get_rnn_classifier_similar(similar, bptt, max_seq, n_class, n_tok, emb_sz, n_hid, n_layers, pad_token, layers, drops, bidir=False,
+                      dropouth=0.3, dropouti=0.5, dropoute=0.1, wdrop=0.5, qrnn=False,similar_cfg=None):
 
     class LM_Encoder(nn.Module):
         def __init__(self):
@@ -3865,67 +4030,14 @@ def get_rnn_classifier_siamese(bptt, max_seq, n_class, n_tok, emb_sz, n_hid, n_l
             r_output = self.rnn_enc(right_input)
             return l_output, r_output
 
-    class Siamese(nn.Module):
-        def __init__(self):
-            super(Siamese,self).__init__()
 
-            self.ndir = 2 if bidir else 1
-            self.n_h = 100
-            self.bs, self.qrnn = 1, qrnn
-            self.shared_lstm = nn.LSTM(emb_sz,self.n_h)
-
-        def one_hidden(self):
-            return Variable(self.weights.new(self.ndir, self.bs, self.n_h).zero_())
-
-        def reset(self):
-            self.weights = next(self.parameters()).data
-            self.hidden = (self.one_hidden(), self.one_hidden())
-
-        def pool(self, x, bs, is_max):
-            f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
-            return f(x.permute(1,2,0), (1,)).view(bs,-1)
-
-        def forward_once(self, x):
-            sl,bs,_ = x.size()
-            if bs!=self.bs:
-                self.bs=bs
-            self.reset()
-            with set_grad_enabled(self.training):
-                new_hidden = []
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    output, self.hidden = self.shared_lstm(x, self.hidden)
-
-                    sl,bs,_ = output.size()
-                    avgpool = self.pool(output, bs, False)
-                    mxpool = self.pool(output, bs, True)
-                    x = torch.cat([output[-1], mxpool, avgpool], 1)
-            return x
-
-        def forward(self, input):
-            l_output, r_output = input
-            with set_grad_enabled(self.training):
-                l_raw_outputs, l_outputs = l_output
-                r_raw_outputs, r_outputs = r_output
-
-                encoded_left = l_outputs[-1]
-                encoded_right = r_outputs[-1]
-
-                left_output = self.forward_once(encoded_left)
-                right_output = self.forward_once(encoded_right)
-
-                # 距离函数 exponent_neg_manhattan_distance
-                x = [left_output, right_output]
-                malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
-            return malstm_distance.view(-1), l_raw_outputs, l_outputs
-
-    return SequentialRNN(LM_Encoder(),Siamese())
+    return SequentialRNN(LM_Encoder(),similar(similar_cfg))
 
 class Double_Learner(Learner):
     def __init__(self, data, models, **kwargs):
         super().__init__(data, models, **kwargs)
 
-    def _get_crit(self, data): return F.mse_loss
+    def _get_crit(self, data): return F.binary_cross_entropy
     def fit(self, *args, **kwargs): return super().fit(*args, **kwargs, seq_first=True)
 
     def save_encoder(self, name): save_model(self.model[0].rnn_enc, self.get_model_path(name))
@@ -3976,12 +4088,12 @@ class Double_DataLoader(DataLoader):
                         yield self.V(batch[0]), self.V(batch[1]), self.V(batch[2])
 
 
-def train_clas(dir_path, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards=False, startat=0, unfreeze=True,
+def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards=False, startat=0, unfreeze=True,
                lr=0.01, dropmult=1.0, bpe=False, use_clr=True,
                use_regular_schedule=False, use_discriminative=True, last=False, chain_thaw=False,
                from_scratch=False, train_file_id='',dtype="char"):
-    print(f"======= train_clas {dtype} ========")
-    print(f'dir_path {dir_path}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
+    print(f"======= train_clas {similar} {dtype} ========")
+    print(f'dir_path {dir_path}; similar {similar}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
         f'dropmult {dropmult} unfreeze {unfreeze} startat {startat}; bpe {bpe}; use_clr {use_clr};'
         f'use_regular_schedule {use_regular_schedule}; use_discriminative {use_discriminative}; last {last};'
         f'chain_thaw {chain_thaw}; from_scratch {from_scratch}; train_file_id {train_file_id};'
@@ -4044,7 +4156,7 @@ def train_clas(dir_path, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards
     #dps = np.array([0.65,0.48,0.039,0.335,0.34])*dropmult
     #dps = np.array([0.6,0.5,0.04,0.3,0.4])*dropmult
 
-    m = get_rnn_classifier_siamese(bptt, 20*70, c, vs, emb_sz=em_sz, n_hid=nh, n_layers=nl, pad_token=1,
+    m = get_rnn_classifier_similar(similar, bptt, 20*70, c, vs, emb_sz=em_sz, n_hid=nh, n_layers=nl, pad_token=1,
               layers=[em_sz*3, 50, c], drops=[dps[4], 0.1],
               dropouti=dps[0], wdrop=dps[1], dropoute=dps[2], dropouth=dps[3])
 
@@ -4116,6 +4228,93 @@ def train_clas(dir_path, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards
     # learn.sched.plot_lr()
     learn.save(final_clas_file)
 
+def load_learn(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards=False, startat=0, unfreeze=True,
+               lr=0.01, dropmult=1.0, bpe=False, use_clr=True,
+               use_regular_schedule=False, use_discriminative=True, last=False, chain_thaw=False,
+               from_scratch=False, train_file_id='',dtype="char"):
+    print(f"======= load_model {similar} {dtype} ========")
+    print(f'dir_path {dir_path}; similar {similar}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
+        f'dropmult {dropmult} unfreeze {unfreeze} startat {startat}; bpe {bpe}; use_clr {use_clr};'
+        f'use_regular_schedule {use_regular_schedule}; use_discriminative {use_discriminative}; last {last};'
+        f'chain_thaw {chain_thaw}; from_scratch {from_scratch}; train_file_id {train_file_id};'
+        f'dtype {dtype}')
+    if not hasattr(torch._C, '_cuda_setDevice'):
+        print('CUDA not available. Setting device=-1.')
+        cuda_id = -1
+    torch.cuda.set_device(cuda_id)
+
+    PRE = 'bwd_' if backwards else 'fwd_'
+    PRE = 'bpe_' + PRE if bpe else PRE
+    IDS = 'bpe' if bpe else 'ids'
+    train_file_id = train_file_id if train_file_id == '' else f'_{train_file_id}'
+    lm_id = lm_id if lm_id == '' else f'{lm_id}_'
+    clas_id = lm_id if clas_id is None else clas_id
+    clas_id = clas_id if clas_id == '' else f'{clas_id}_'
+    intermediate_clas_file = f'{PRE}{clas_id}clas_0_{dtype}'
+    final_clas_file = f'{PRE}{clas_id}clas_1_{dtype}'
+    lm_file = f'{PRE}{lm_id}lm_{dtype}_enc'
+    lm_path = dir_path + "/" + 'models' + "/" + f'{lm_file}.h5'
+    assert os.path.exists(lm_path), f'Error: {lm_path} does not exist.'
+
+    bptt,em_sz,nh,nl = 70,400,1150,3
+    opt_fn = partial(optim.Adam, betas=(0.8, 0.99))
+
+    if backwards:
+        trn_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'trn_{IDS}{train_file_id}_{dtype}_bwd.npy')
+        val_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'val_{IDS}_{dtype}_bwd.npy')
+    else:
+        trn_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'trn_{IDS}{train_file_id}_{dtype}.npy')
+        val_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'val_{IDS}_{dtype}.npy')
+
+    trn_lbls = np.load(dir_path + "/" + 'tmp' + "/" + f'lbl_trn{train_file_id}.npy')
+    val_lbls = np.load(dir_path + "/" + 'tmp' + "/" + f'lbl_val.npy')
+    print(dir_path + "/" + 'tmp' + "/" + f'lbl_trn{train_file_id}_{dtype}.npy')
+    print(dir_path + "/" + 'tmp' + "/" + f'lbl_val_{dtype}.npy')
+    trn_sent, val_sent = trn_sent.reshape(-1,2), val_sent.reshape(-1,2)
+    print(trn_sent.shape, val_sent.shape)
+    print(trn_lbls.shape, val_lbls.shape)
+    trn_lbls = trn_lbls.astype(np.float32)
+    val_lbls = val_lbls.astype(np.float32)
+    c=int(trn_lbls.max())+1
+
+    if bpe: vs=30002
+    else:
+        itos = pickle.load(open(dir_path + "/" + 'tmp' + "/" + f'itos_{dtype}.pkl', 'rb'))
+        vs = len(itos)
+
+    trn_ds = Double_TextDataset(trn_sent[:,0], trn_sent[:,1], trn_lbls)
+    val_ds = Double_TextDataset(val_sent[:,0], val_sent[:,1], val_lbls)
+    trn_samp = SortishSampler(trn_sent, key=lambda x: len(trn_sent[x]), bs=bs//2)
+    val_samp = SortSampler(val_sent, key=lambda x: len(val_sent[x]))
+    trn_dl = Double_DataLoader(trn_ds, bs//2, transpose=True, num_workers=1, pad_idx=1, sampler=trn_samp)
+    val_dl = Double_DataLoader(val_ds, bs, transpose=True, num_workers=1, pad_idx=1, sampler=val_samp)
+
+    md = ModelData(dir_path, trn_dl, val_dl)
+
+    dps = np.array([0.4,0.5,0.05,0.3,0.4])*dropmult
+    #dps = np.array([0.5, 0.4, 0.04, 0.3, 0.6])*dropmult
+    #dps = np.array([0.65,0.48,0.039,0.335,0.34])*dropmult
+    #dps = np.array([0.6,0.5,0.04,0.3,0.4])*dropmult
+
+    m = get_rnn_classifier_similar(similar, bptt, 20*70, c, vs, emb_sz=em_sz, n_hid=nh, n_layers=nl, pad_token=1,
+              layers=[em_sz*3, 50, c], drops=[dps[4], 0.1],
+              dropouti=dps[0], wdrop=dps[1], dropoute=dps[2], dropouth=dps[3])
+
+    learn = Double_Learner(md, Double_Model(to_gpu(m)), opt_fn=opt_fn)
+    learn.reg_fn = partial(seq2seq_reg, alpha=2, beta=1)
+    learn.clip=25.
+    learn.metrics = [f1_np]
+
+    learn.load(final_clas_file)
+    return learn
+
+
+def eval_learn(learn):
+    y = learn.predict()
+    print(y)
+    return y
+
+
 def main(dtypes, bss):
     # transform_weight(cfgs[0])
     # transform_weight(cfgs[1])
@@ -4169,15 +4368,33 @@ def main(dtypes, bss):
         for dtype,bs in zip(dtypes,bss):
             '''训练分类器'''
             # bs = 32
-            train_clas(model_dir+"atec", cuda_id=0, cl=50, bs=bs, dtype=dtype)
-            #train_clas(model_dir+"atec", cuda_id=0, cl=1, bs=bs, dtype=dtype)
+            # train_clas(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=50, bs=bs, dtype=dtype)
+            train_clas(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=1, bs=bs, dtype=dtype)
+
+    def find_best_thr():
+        for dtype,bs in zip(dtypes,bss):
+            learn = load_learn(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=1, bs=bs, dtype=dtype)
+            eval_learn(learn)
 
     # step1()
     # step2()
-    step3()
+    # step3()
+    find_best_thr()
         
 
 if __name__ == '__main__':    
     dtypes = ["char"]
     bss = [600]
     main(dtypes,bss)
+
+'''
+载入训练好的模型，处理验证集数据得到预测值
+处理新的文本数据得到预测值
+模型最优f1评分的阈值
+
+两个rnn编码网络的loss正则项进行平均
+use_swa=True怎么用
+构建之前的siamese和esim，输入为400*3维
+sortish 两个输入的排序问题
+
+'''
