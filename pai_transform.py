@@ -4309,10 +4309,27 @@ def load_learn(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
     return learn
 
 
+def r_f1_thresh(y_pred,y_true):
+    from sklearn.metrics import f1_score
+    import pandas as pd
+    e = np.zeros((len(y_true),2))
+    e[:,0] = y_pred.reshape(-1)
+    e[:,1] = y_true
+    f = pd.DataFrame(e)
+    m1,m2,fact = 0,1000,1000
+    x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
+    f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
+    return f.corr()[0][1], f1_, thresh
+
+
 def eval_learn(learn):
-    y = learn.predict()
-    print(y)
-    return y
+    y_pred = learn.predict()
+
+    val_lbls = np.load(model_dir + "atec" + "/" + 'tmp' + "/" + f'lbl_val.npy')
+    y_true = val_lbls.astype(np.float32)
+
+    print(r_f1_thresh(y_pred,y_true))
+
 
 
 def main(dtypes, bss):
