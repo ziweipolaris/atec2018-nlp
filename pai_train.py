@@ -35,12 +35,14 @@ from gensim.models.fasttext import FastText
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
-online = False
-if not online:
+try:
+    print(model_dir)
+    test_size = 0.025
+    online=True
+except:
     model_dir = "pai_model/"
     test_size = 0.05
-else:
-    test_size = 0.025
+    online=False
 
 
 w2v_length = 300
@@ -747,7 +749,9 @@ def find_out_best_combine():
 # evaluate_models_from_config()
 # find_out_best_combine()
 
-def result(df1):
+def result():
+    if not online: df1 = pd.read_csv(model_dir+"atec_nlp_sim_train.csv",sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
+  
     # to evaluate for the result
     if not online:
         best_threshold = 0.1400 
@@ -770,13 +774,6 @@ def result(df1):
     enmodel = Ensemble(best_cfgs,best_wgts)
     result = enmodel.predict(train_xs,batch_size=batch_size) > best_threshold
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
-    if not online:
-        print(df_output)
-    else:
-        topai(1,df_output)
-
-if not online:
-    df1 = pd.read_csv(model_dir+"atec_nlp_sim_train.csv",sep="\t", header=None, encoding="utf8")
-    df1.columns=["id","sent1","sent2","label"]
-
-# result(df1)
+    if online: topai(1,df_output)
+    else: print(df_output)
+# result()

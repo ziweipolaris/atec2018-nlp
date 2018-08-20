@@ -1,8 +1,9 @@
 # https://pai4contest.cloud.alipay.com/experiment.htm?Lang=zh_CN&lang=zh_CN&etag=iZbp10tfg72g1zj2tnd6rwZ&experimentId=3508
 import gensim
 import numpy as np
+import pandas as pd
 import os
-
+import re
 try:
     import jieba_fast as jieba
 except Exception as e:
@@ -13,9 +14,11 @@ from sklearn.model_selection import train_test_split
 try:
     print(model_dir)
     test_size = 0.025
+    online=True
 except:
     model_dir = "pai_model/"
     test_size = 0.05
+    online=False
 
 random_state = 42
 
@@ -160,99 +163,6 @@ def transform_wiki():
                     if len(doc)>=10:
                         wiki_out.write(title+"|"+doc+"\n")
 
-
-Punctuation = set("。？！，、；：「」『』‘’“”（〔〕【】—…–．《》〈〉")
-class WikiChars(object):
-    def __init__(self):pass
-    def __iter__(self):
-        with open(model_dir + "wiki.csv",'r',encoding="utf8") as wiki:
-            for line in wiki:
-                title, doc = line.strip().split("|")
-                for sentense in doc.split("#"):
-                    if len(sentense)>0:
-                        yield [char for char in sentense if char and (0x4E00<= ord(char) <= 0x9FA5 or char in Punctuation) ]
-
-class WikiWords(object):
-    def __init__(self):pass
-    def __iter__(self):
-        with open(model_dir + "wiki.csv",'r',encoding="utf8") as wiki:
-            for line in wiki:
-                title, doc = line.strip().split("|")
-                for sentense in doc.split("#"):
-                    if len(sentense)>0:
-                        yield [word for word in list(jieba.cut(sentense)) if word and (0x4E00<= ord(word[0]) <= 0x9FA5 or word[0] in Punctuation)]
-
-
-class AtecChars(object):
-    def __init__(self):pass
-    def __iter__(self):
-        with open(model_dir + "atec_nlp_sim_train.csv",'r',encoding="utf8") as atec:
-            for line in atec:
-                lineno, s1, s2, label=line.strip().split("\t")
-                yield [char for char in s1 if char and (0x4E00<= ord(char) <= 0x9FA5 or char in Punctuation) ], \
-                    [char for char in s2 if char and (0x4E00<= ord(char) <= 0x9FA5 or char in Punctuation) ]
-
-class AtecWords(object):
-    def __init__(self):pass
-    def __iter__(self):
-        with open(model_dir + "atec_nlp_sim_train.csv",'r',encoding="utf8") as atec:
-            for line in atec:
-                lineno, s1, s2, label=line.strip().split("\t")
-                yield [word for word in list(jieba.cut(s1)) if word and (0x4E00<= ord(word[0]) <= 0x9FA5 or word[0] in Punctuation)], \
-                    [word for word in list(jieba.cut(s2)) if word and (0x4E00<= ord(word[0]) <= 0x9FA5 or word[0] in Punctuation)]
-
-def create_lm_csv(corpus, dtype, n_tokens = 1000000):
-    
-    n_tokens2 = n_tokens + 0.1*n_tokens
-
-    train_array, val_array = [],[]
-    if corpus=="wiki":
-        if dtype=="char":
-            data = WikiChars()
-        else:
-            data = WikiWords()
-    elif corpus=="atec":
-        if dtype=="char":
-            data = AtecChars()
-        else:
-            data = AtecWords()
-    os.makedirs(model_dir + corpus, exist_ok=True)
-    train_file = open(model_dir + corpus + "/lm_%s_train.csv"%dtype, 'w', encoding="utf8")
-    valid_file = open(model_dir + corpus + "/lm_%s_valid.csv"%dtype, 'w', encoding="utf8")
-    if corpus=="wiki":
-        length = 0
-        for line in data:
-            length += len(line)
-            if length<=n_tokens:
-                train_file.write(" ".join(line)+"\n")
-            elif length<=n_tokens2:
-                valid_file.write(" ".join(line)+"\n")
-            else:
-                break
-    elif corpus=="atec":
-        data = [[s1,s2] for s1,s2 in data]
-        train, val = train_test_split(data, test_size=test_size, random_state=random_state)
-        for s1,s2 in train:
-            train_file.write(" ".join(s1)+"\n")
-            train_file.write(" ".join(s2)+"\n")
-        for s1,s2 in val:
-            valid_file.write(" ".join(s1)+"\n")
-            valid_file.write(" ".join(s2)+"\n")
-
-    train_file.flush()
-    train_file.close()
-    valid_file.flush()
-    valid_file.close()
-
-def create_ids_lbls():
-    with open(model_dir + "atec_nlp_sim_train.csv",'r',encoding="utf8") as atec:
-        labels = []
-        for line in atec:
-            lineno, s1, s2, label=line.strip().split("\t")
-            labels.append(int(label))
-    train, valid = train_test_split(labels, test_size=test_size, random_state=random_state)
-    np.save(model_dir + f"atec/tmp/lbl_trn.npy", train)
-    np.save(model_dir + f"atec/tmp/lbl_val.npy", valid)
 
 # start imports###################################################################
 import time
@@ -1987,30 +1897,31 @@ def fix_batchnorm(swa_model, train_dl):
     """
     bn_modules = []
     swa_model.apply(lambda module: collect_bn_modules(module, bn_modules))
-    
+
     if not bn_modules: return
 
     swa_model.train()
-
     for module in bn_modules:
         module.running_mean = torch.zeros_like(module.running_mean)
         module.running_var = torch.ones_like(module.running_var)
     
     momenta = [m.momentum for m in bn_modules]
-
     inputs_seen = 0
 
-    for (*x,y) in iter(train_dl):        
-        xs = V(x)
-        batch_size = xs[0].size(0)
+    with torch.no_grad():
+        for (*x,y) in iter(train_dl):        
+            xs = V(x)
+            batch_size = xs[0].size(1)
 
-        momentum = batch_size / (inputs_seen + batch_size)
-        for module in bn_modules:
-            module.momentum = momentum
-                            
-        res = swa_model(*xs)        
-        
-        inputs_seen += batch_size
+            momentum = batch_size / (inputs_seen + batch_size)
+            for module in bn_modules:
+                module.momentum = momentum
+
+            if len(xs)==1: swa_model(*xs)
+            else: swa_model(xs)
+
+            
+            inputs_seen += batch_size
                 
     for module, momentum in zip(bn_modules, momenta):
         module.momentum = momentum
@@ -2092,7 +2003,6 @@ class Stepper():
         if len(xs)==1:
             preds = self.m(*xs)
         else:
-
             preds = self.m(xs)
         if isinstance(preds,tuple): preds=preds[0]
         return preds, self.crit(preds, y)
@@ -2164,9 +2074,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
 
             print(f"batch: {index+1} / {num_batch} loss={debias_loss}")
 
-            # if index>30:
-            #     stop=True
-            # else:
+            # if index>3: batch_num = 10e10
             stop=False
             los = debias_loss if not all_val else [debias_loss] + validate_next(model_stepper,metrics, val_iter)
             for cb in callbacks: stop = stop or cb.on_batch_end(los)
@@ -2189,7 +2097,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
             for cb in callbacks: stop = stop or cb.on_epoch_end(vals)
             if swa_model is not None:
                 if (epoch + 1) >= swa_start and ((epoch + 1 - swa_start) % swa_eval_freq == 0 or epoch == tot_epochs - 1):
-                    fix_batchnorm(swa_model, cur_data.trn_dl)
+                    # fix_batchnorm(swa_model, cur_data.trn_dl)
                     swa_vals = validate(swa_stepper, cur_data.val_dl, metrics, epoch, validate_skip = validate_skip)
                     vals += swa_vals
 
@@ -2290,6 +2198,7 @@ def predict_with_targs_(m, dl):
     return zip(*res)
 
 def predict_with_targs(m, dl):
+    m.eval()
     preda,targa = predict_with_targs_(m, dl)
     return np.concatenate(preda), np.concatenate(targa)
 
@@ -2475,6 +2384,7 @@ class Learner():
         self.crit = crit if crit else self._get_crit(data)
         self.reg_fn = None
         self.fp16 = False
+        self.swa_model = copy.deepcopy(self.model)
 
     @classmethod
     def from_model_data(cls, m, data, **kwargs):
@@ -2563,7 +2473,7 @@ class Learner():
 
     def fit_gen(self, model, data, layer_opt, n_cycle, cycle_len=None, cycle_mult=1, cycle_save_name=None, best_save_name=None,
                 use_clr=None, use_clr_beta=None, metrics=None, callbacks=None, use_wd_sched=False, norm_wds=False,             
-                wds_sched_mult=None, use_swa=False, swa_start=1, swa_eval_freq=5, **kwargs):
+                wds_sched_mult=None, use_swa=True, swa_start=1, swa_eval_freq=1, **kwargs):
 
         """Method does some preparation before finally delegating to the 'fit' method for
         fitting the model. Namely, if cycle_len is defined, it adds a 'Cosine Annealing'
@@ -2655,14 +2565,16 @@ class Learner():
             moms = use_clr[2:] if len(use_clr) > 2 else None
             cycle_end = self.get_cycle_end(cycle_save_name)
             assert cycle_len, "use_clr requires cycle_len arg"
-            self.sched = CircularLR(layer_opt, len(data.trn_dl)*cycle_len, on_cycle_end=cycle_end, div=clr_div, cut_div=cut_div,
+            total_iterators = len(data.trn_dl)*cycle_len
+            self.sched = CircularLR(layer_opt, total_iterators, on_cycle_end=cycle_end, div=clr_div, cut_div=cut_div,
                                     momentums=moms)
         elif use_clr_beta is not None:
             div,pct = use_clr_beta[:2]
             moms = use_clr_beta[2:] if len(use_clr_beta) > 3 else None
             cycle_end = self.get_cycle_end(cycle_save_name)
             assert cycle_len, "use_clr_beta requires cycle_len arg"
-            self.sched = CircularLR_beta(layer_opt, len(data.trn_dl)*cycle_len, on_cycle_end=cycle_end, div=div,
+            total_iterators = len(data.trn_dl)*cycle_len
+            self.sched = CircularLR_beta(layer_opt, total_iterators, on_cycle_end=cycle_end, div=div,
                                     pct=pct, momentums=moms)
         elif cycle_len:
             cycle_end = self.get_cycle_end(cycle_save_name)
@@ -2674,12 +2586,14 @@ class Learner():
         if best_save_name is not None:
             callbacks+=[SaveBestModel(self, layer_opt, metrics, best_save_name)]
 
-        if use_swa:
+        n_epoch = int(sum_geom(cycle_len if cycle_len else 1, cycle_mult, n_cycle))
+
+        if use_swa or not use_swa:
             # make a copy of the model to track average weights
-            self.swa_model = copy.deepcopy(model)
+            # self.swa_model = copy.deepcopy(model)
+            # swa_start = 1 if n_epoch < 10 else n_epoch-9       # 保存最后10个的平均值
             callbacks+=[SWA(model, self.swa_model, swa_start)]
 
-        n_epoch = int(sum_geom(cycle_len if cycle_len else 1, cycle_mult, n_cycle))
         return fit(model, data, n_epoch, layer_opt.opt, self.crit,
             metrics=metrics, callbacks=callbacks, reg_fn=self.reg_fn, clip=self.clip, fp16=self.fp16,
             swa_model=self.swa_model if use_swa else None, swa_start=swa_start, 
@@ -2813,7 +2727,9 @@ class Learner():
         m = self.swa_model if use_swa else self.model
         return predict_with_targs(m, dl)
 
-    def predict_dl(self, dl): return predict_with_targs(self.model, dl)[0]
+    def predict_dl(self, dl, use_swa=False): 
+        m = self.swa_model if use_swa else self.model
+        return predict_with_targs(m, dl)[0]
 
     def predict_array(self, arr):
         self.model.eval()
@@ -3007,7 +2923,9 @@ class RNN_Learner(Learner):
     def _get_crit(self, data): return F.cross_entropy
     def fit(self, *args, **kwargs): return super().fit(*args, **kwargs, seq_first=True)
 
-    def save_encoder(self, name): save_model(self.model[0], self.get_model_path(name))
+    def save_encoder(self, name): 
+        save_model(self.model[0], self.get_model_path(name))
+        if hasattr(self, "swa_model"): save_model(self.swa_model[0], self.get_model_path(name[:-4]+"-swa"+name[-4:]))
     def load_encoder(self, name): load_model(self.model[0], self.get_model_path(name))
 
 
@@ -3299,9 +3217,7 @@ class RNN_Encoder(nn.Module):
             new_hidden,raw_outputs,outputs = [],[],[]
             for l, (rnn,drop) in enumerate(zip(self.rnns, self.dropouths)):
                 current_input = raw_output
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    raw_output, new_h = rnn(raw_output, self.hidden[l])
+                raw_output, new_h = rnn(raw_output, self.hidden[l])
                 new_hidden.append(new_h)
                 raw_outputs.append(raw_output)
                 if l != self.n_layers - 1: raw_output = drop(raw_output)
@@ -3597,40 +3513,109 @@ def get_learner(drops, n_neg, sampled, md, em_sz, nh, nl, opt_fn, prs):
 
 
 
+Punctuation = set("。？！，、；：「」『』‘’“”（〔〕【】—…–．《》〈〉|#")
+re_num = re.compile(r"\d+")
+re_star = re.compile(r"\*{3}")
+num = "X"
+def split_sentence(sentence,dtype):
+    if dtype == "char":
+        return [char for char in sentence if char and (0x4E00<= ord(char) <= 0x9FA5 or char in Punctuation or char==num) ]
+    elif dtype == "word":
+        return [word for word in list(jieba.cut(sentence)) if word and (0x4E00<= ord(word[0]) <= 0x9FA5 or word[0] in Punctuation or word==num)]
+
+class WikiCorpus(object):
+    def __init__(self):pass
+    def __iter__(self):
+        with open(model_dir + "wiki.csv",'r',encoding="utf8") as wiki:
+            for line in wiki:
+                line = re_num.sub(num,line)
+                yield line
+
+class AtecCorpus(object):
+    def __init__(self):pass
+    def __iter__(self):
+        with open(model_dir + "atec_nlp_sim_train.csv",'r',encoding="utf8") as atec:
+            for line in atec:
+                lineno, s1, s2, label=line.strip().split("\t")
+                s1 = re_star.sub(num,s1)
+                s2 = re_star.sub(num,s2)
+                yield s1, s2
+
+def create_lm_csv(corpus, articles = 5000):
+    train_array, val_array = [],[]
+    if corpus=="wiki":data = WikiCorpus()
+    elif corpus=="atec":data = AtecCorpus()
+
+    os.makedirs(model_dir + corpus, exist_ok=True)
+    len_trn, len_val = 0, 0
+    train_file = open(model_dir + corpus + "/lm_train.csv", 'w', encoding="utf8")
+    valid_file = open(model_dir + corpus + "/lm_valid.csv", 'w', encoding="utf8")
+    if corpus=="wiki":
+        np.random.seed(random_state)
+        random_choice = np.random.rand(articles)
+        for index, line in enumerate(data):
+            if index>=articles: break
+            if random_choice[index]<0.01:
+                valid_file.write(line)
+                len_val += 1
+            else:
+                train_file.write(line)
+                len_trn += 1
+    elif corpus=="atec":
+        data = [[s1,s2] for s1,s2 in data]
+        train, val = train_test_split(data, test_size=test_size, random_state=random_state)
+        for s1,s2 in train:
+            train_file.write(s1+"\n")
+            train_file.write(s2+"\n")
+            len_trn += 2
+        for s1,s2 in val:
+            valid_file.write(s1+"\n")
+            valid_file.write(s2+"\n")
+            len_val += 2
+
+    train_file.flush()
+    train_file.close()
+    valid_file.flush()
+    valid_file.close()
+    print("create_lm_csv", len_trn, len_val)
 
 BOS = 'xbos'  # beginning-of-sentence tag
 FLD = 'xfld'  # data field tag
 
+def process_sentence(s, dtype, backwards):
+    tokens = split_sentence(s,dtype)
+    if backwards:tokens = list(reversed(tokens))
+    return ['\n', BOS, FLD, '1'] + tokens
 
-def get_all(filename):
-    tok = []
-    for line in open(filename,'r',encoding="utf8"):
-        tok.append((f'\n {BOS} {FLD} 1 '+line.strip()).split(" "))
-    return tok
 
-def create_toks(dir_path, chunksize=24000, dtype='char'):
-    print(f'dir_path {dir_path} chunksize {chunksize} dtype {dtype}')
+def create_toks(dir_path, dtype='char', backwards=False):
+    print(f'=== create_toks: dir_path {dir_path} backwards {backwards} dtype {dtype}')
 
     assert os.path.exists(dir_path), f'Error: {dir_path} does not exist.'
 
     tmp_path = dir_path + "/" + 'tmp'
     os.makedirs(tmp_path, exist_ok=True)
-    tok_trn = get_all(dir_path + "/" + f"lm_{dtype}_train.csv")
-    tok_val = get_all(dir_path + "/" + f"lm_{dtype}_valid.csv")
+    get_all = lambda filename: [process_sentence(line,dtype,backwards) for line in open(filename,'r',encoding="utf8")]
 
-    np.save(tmp_path + "/" + f'tok_trn_{dtype}.npy', tok_trn)
-    np.save(tmp_path + "/" + f'tok_val_{dtype}.npy', tok_val)
+    tok_trn = get_all(dir_path + "/" + f"lm_train.csv")
+    tok_val = get_all(dir_path + "/" + f"lm_valid.csv")
+
+    BWD = '_bwd' if backwards else ""
+    np.save(tmp_path + "/" + f'tok_trn_{dtype}{BWD}.npy', tok_trn)
+    np.save(tmp_path + "/" + f'tok_val_{dtype}{BWD}.npy', tok_val)
+    print("create_toks", len(tok_trn), len(tok_val))
 
 
-def tok2id(dir_path, max_vocab=30000, min_freq=1, dtype="char"):
-    print(f'dir_path {dir_path} max_vocab {max_vocab} min_freq {min_freq}')
+def tok2id(dir_path, max_vocab, min_freq=1, dtype="char", backwards=False):
+    print(f'=== tok2id: dir_path {dir_path} max_vocab {max_vocab} min_freq {min_freq}')
     p = dir_path
     assert os.path.exists(p), f'Error: {p} does not exist.'
     tmp_path = p + "/" + 'tmp'
     assert os.path.exists(tmp_path), f'Error: {tmp_path} does not exist.'
+    BWD = '_bwd' if backwards else ""
 
-    trn_tok = np.load(tmp_path + "/" + f'tok_trn_{dtype}.npy')
-    val_tok = np.load(tmp_path + "/" + f'tok_val_{dtype}.npy')
+    trn_tok = np.load(tmp_path + "/" + f'tok_trn_{dtype}{BWD}.npy')
+    val_tok = np.load(tmp_path + "/" + f'tok_val_{dtype}{BWD}.npy')
 
     freq = Counter(p for o in trn_tok for p in o)
     print(freq.most_common(25))
@@ -3643,58 +3628,29 @@ def tok2id(dir_path, max_vocab=30000, min_freq=1, dtype="char"):
     trn_lm = np.array([[stoi[o] for o in p] for p in trn_tok])
     val_lm = np.array([[stoi[o] for o in p] for p in val_tok])
 
-    np.save(tmp_path + "/" + f'trn_ids_{dtype}.npy', trn_lm)
-    np.save(tmp_path + "/" + f'val_ids_{dtype}.npy', val_lm)
+    np.save(tmp_path + "/" + f'trn_ids_{dtype}{BWD}.npy', trn_lm)
+    np.save(tmp_path + "/" + f'val_ids_{dtype}{BWD}.npy', val_lm)
+    # 前向和后向的词典相同
     pickle.dump(itos, open(tmp_path + "/" + f'itos_{dtype}.pkl', 'wb'))
+    print("tok2id", len(trn_lm), len(val_lm))
 
+def sent_token2id(sents, dir_path, dtype, backwards):
+    sents = [process_sentence(s,dtype,backwards) for s in sents]
+    tmp_path = dir_path + "/" + 'tmp'
+    itos = pickle.load(open(tmp_path + "/" + f'itos_{dtype}.pkl', 'rb'))
+    stoi = collections.defaultdict(lambda:0, {v:k for k,v in enumerate(itos)})
+    return np.array([[stoi[o] for o in p] for p in sents])
 
-def pretrain_lm(dir_path, cuda_id, cl=1, bs=64, backwards=False, lr=3e-4, sampled=True,
-             pretrain_id='',dtype="char"):
-    print(f"======= pretrain_lm {dtype} ========")
-    print(f'dir_path {dir_path}; cuda_id {cuda_id}; cl {cl}; bs {bs}; '
-          f'backwards {backwards}; lr {lr}; sampled {sampled}; '
-          f'pretrain_id {pretrain_id}; dtype {dtype}')
-    if not hasattr(torch._C, '_cuda_setDevice'):
-        print('CUDA not available. Setting device=-1.')
-        cuda_id = -1
-    torch.cuda.set_device(cuda_id)
-    PRE  = 'bwd_' if backwards else 'fwd_'
-    IDS = 'ids'
-    p = dir_path
-    assert os.path.exists(p), f'Error: {p} does not exist.'
-    bptt=70
-    em_sz,nh,nl = 400,1150,3
-    opt_fn = partial(optim.Adam, betas=(0.8, 0.99))
-
-    if backwards:
-        trn_lm = np.load(p + "/" + f'tmp/trn_{IDS}_{dtype}_bwd.npy')
-        val_lm = np.load(p + "/" + f'tmp/val_{IDS}_{dtype}_bwd.npy')
-    else:
-        trn_lm = np.load(p + "/" + f'tmp/trn_{IDS}_{dtype}.npy')
-        val_lm = np.load(p + "/" + f'tmp/val_{IDS}_{dtype}.npy')
-    trn_lm = np.concatenate(trn_lm)
-    val_lm = np.concatenate(val_lm)
-
-    itos = pickle.load(open(p + "/" + f'tmp/itos_{dtype}.pkl', 'rb'))
-    vs = len(itos)
-
-    trn_dl = LanguageModelLoader(trn_lm, bs, bptt)
-    val_dl = LanguageModelLoader(val_lm, bs//5 if sampled else bs, bptt)
-    md = LanguageModelData(p, 1, vs, trn_dl, val_dl, bs=bs, bptt=bptt)
-
-    tprs = get_prs(trn_lm, vs)
-    drops = np.array([0.25, 0.1, 0.2, 0.02, 0.15])*0.5
-    n_neg = 1000 if dtype == "char" else 15000
-    learner,crit = get_learner(drops, n_neg, sampled, md, em_sz, nh, nl, opt_fn, tprs)
-    wd=1e-7
-    learner.metrics = [accuracy]
-
-    lrs = np.array([lr/6,lr/3,lr,lr])
-    #lrs=lr
-
-    learner.fit(lrs, 1, wds=wd, use_clr=(32,10), cycle_len=cl)
-    learner.save(f'{PRE}{pretrain_id}_{dtype}')
-    learner.save_encoder(f'{PRE}{pretrain_id}_{dtype}_enc')
+def create_ids_lbls():
+    with open(model_dir + "atec_nlp_sim_train.csv",'r',encoding="utf8") as atec:
+        labels = []
+        for line in atec:
+            lineno, s1, s2, label=line.strip().split("\t")
+            labels.append(int(label))
+    train, valid = train_test_split(labels, test_size=test_size, random_state=random_state)
+    np.save(model_dir + f"atec/tmp/lbl_trn.npy", train)
+    np.save(model_dir + f"atec/tmp/lbl_val.npy", valid)
+    print("create_ids_lbls", len(train), len(valid))
 
 
 class EarlyStopping(Callback):
@@ -3725,13 +3681,62 @@ class EarlyStopping(Callback):
         self.learner.load(self.save_path)
 
 
+def pretrain_lm(dir_path, cuda_id, cl=1, bs=64, backwards=False, lr=3e-4, sampled=True, early_stopping=True,
+             preload = False, pretrain_id='',dtype="char"):
+    print(f'=== pretrain_lm: dir_path {dir_path}; cuda_id {cuda_id}; cl {cl}; bs {bs}; '
+          f'backwards {backwards}; lr {lr}; sampled {sampled}; early stopping {early_stopping}; '
+          f'preload {preload}; pretrain_id {pretrain_id}; dtype {dtype}')
+    if not hasattr(torch._C, '_cuda_setDevice'):
+        print('CUDA not available. Setting device=-1.')
+        cuda_id = -1
+    torch.cuda.set_device(cuda_id)
+    PRE = 'bwd_' if backwards else 'fwd_'
+    BWD = '_bwd' if backwards else ""
+    p = dir_path
+    assert os.path.exists(p), f'Error: {p} does not exist.'
+    bptt=70
+    em_sz,nh,nl = 400,1150,3
+    opt_fn = partial(optim.Adam, betas=(0.8, 0.99))
+
+    trn_lm = np.load(p + "/" + f'tmp/trn_ids_{dtype}{BWD}.npy')
+    val_lm = np.load(p + "/" + f'tmp/val_ids_{dtype}{BWD}.npy')
+    trn_lm = np.concatenate(trn_lm)
+    val_lm = np.concatenate(val_lm)
+
+    itos = pickle.load(open(p + "/" + f'tmp/itos_{dtype}.pkl', 'rb'))
+    vs = len(itos)
+
+    trn_dl = LanguageModelLoader(trn_lm, bs, bptt)
+    val_dl = LanguageModelLoader(val_lm, bs//5 if sampled else bs, bptt)
+    md = LanguageModelData(p, 1, vs, trn_dl, val_dl, bs=bs, bptt=bptt)
+
+    tprs = get_prs(trn_lm, vs)
+    drops = np.array([0.25, 0.1, 0.2, 0.02, 0.15])*0.5
+    n_neg = 1000 if dtype == "char" else 15000
+    learner,crit = get_learner(drops, n_neg, sampled, md, em_sz, nh, nl, opt_fn, tprs)
+    wd=1e-7
+    learner.metrics = [accuracy]
+
+    lrs = np.array([lr/6,lr/3,lr,lr])
+    #lrs=lr
+
+    lm_path = f'{PRE}{pretrain_id}_{dtype}'
+    enc_path = f'{PRE}{pretrain_id}_{dtype}_enc'
+    callbacks = []
+    if False and early_stopping:
+        callbacks.append(EarlyStopping(learner, lm_path, enc_path, patience=5))
+        print('Using early stopping...')
+    if preload: learner.load(lm_path)
+    learner.fit(lrs, 1, wds=wd, use_clr=(32,10), cycle_len=cl, callbacks=callbacks)
+    learner.save(lm_path)
+    learner.save_encoder(enc_path)
+
 def finetune_lm(dir_path, pretrain_path, cuda_id=0, cl=25, pretrain_id='', lm_id='', bs=64,
-             dropmult=1.0, backwards=False, lr=4e-3, preload=True, bpe=False, startat=0,
+             dropmult=1.0, backwards=False, lr=4e-3, preload=True, bpe=False, startat=0, 
              use_clr=True, use_regular_schedule=False, use_discriminative=True, notrain=False, joined=False,
-             train_file_id='', early_stopping=False, dtype="char"):
-    print(f"======= finetune_lm {dtype} ========")
-    print(f'dir_path {dir_path}; pretrain_path {pretrain_path}; cuda_id {cuda_id}; '
-          f'pretrain_id {pretrain_id}; cl {cl}; bs {bs}; backwards {backwards} '
+             train_file_id='', early_stopping=True, dtype="char"):
+    print(f'=== finetune_lm: dir_path {dir_path}; pretrain_path {pretrain_path}; cuda_id {cuda_id}; '
+          f'pretrain_id {pretrain_id}; cl {cl}; bs {bs}; backwards {backwards}; '
           f'dropmult {dropmult}; lr {lr}; preload {preload}; bpe {bpe};'
           f'startat {startat}; use_clr {use_clr}; notrain {notrain}; joined {joined} '
           f'early stopping {early_stopping}; dtype {dtype}')
@@ -3744,8 +3749,8 @@ def finetune_lm(dir_path, pretrain_path, cuda_id=0, cl=25, pretrain_id='', lm_id
     PRE  = 'bwd_' if backwards else 'fwd_'
     PRE = 'bpe_' + PRE if bpe else PRE
     IDS = 'bpe' if bpe else 'ids'
+    BWD = '_bwd' if backwards else ""
     train_file_id = train_file_id if train_file_id == '' else f'_{train_file_id}'
-    joined_id = 'lm_' if joined else ''
     lm_id = lm_id if lm_id == '' else f'{lm_id}_'
     lm_path=f'{PRE}{lm_id}lm_{dtype}'
     enc_path=f'{PRE}{lm_id}lm_{dtype}_enc'
@@ -3758,12 +3763,8 @@ def finetune_lm(dir_path, pretrain_path, cuda_id=0, cl=25, pretrain_id='', lm_id
     em_sz,nh,nl = 400,1150,3
     opt_fn = partial(optim.Adam, betas=(0.8, 0.99))
 
-    if backwards:
-        trn_lm_path = dir_path + "/" + 'tmp' + "/" + f'trn_{joined_id}{IDS}{train_file_id}_{dtype}_bwd.npy'
-        val_lm_path = dir_path + "/" + 'tmp' + "/" + f'val_{joined_id}{IDS}_{dtype}_bwd.npy'
-    else:
-        trn_lm_path = dir_path + "/" + 'tmp' + "/" + f'trn_{joined_id}{IDS}{train_file_id}_{dtype}.npy'
-        val_lm_path = dir_path + "/" + 'tmp' + "/" + f'val_{joined_id}{IDS}_{dtype}.npy'
+    trn_lm_path = dir_path + "/" + 'tmp' + "/" + f'trn_{IDS}{train_file_id}_{dtype}{BWD}.npy'
+    val_lm_path = dir_path + "/" + 'tmp' + "/" + f'val_{IDS}_{dtype}{BWD}.npy'
 
     print(f'Loading {trn_lm_path} and {val_lm_path}')
     trn_lm = np.load(trn_lm_path)
@@ -3831,7 +3832,7 @@ def finetune_lm(dir_path, pretrain_path, cuda_id=0, cl=25, pretrain_id='', lm_id
         else:
             n_cycles=1
         callbacks = []
-        if early_stopping:
+        if False and early_stopping:
             callbacks.append(EarlyStopping(learner, lm_path, enc_path, patience=5))
             print('Using early stopping...')
         learner.fit(lrs, n_cycles, wds=wd, use_clr=(32,10) if use_clr else None, cycle_len=cl,
@@ -3872,7 +3873,7 @@ class Siamese_Baseline(nn.Module):
 
     def reset(self):
         self.weights = next(self.parameters()).data
-        self.hidden = (self.one_hidden(), self.one_hidden())
+        self.hidden = (self.one_hidden(), self.one_hidden())    # 初始化值 h0 和 c0
 
     def pool(self, x, bs, is_max):
         f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
@@ -3884,16 +3885,12 @@ class Siamese_Baseline(nn.Module):
             self.bs=bs
             self.reset()
         with set_grad_enabled(self.training):
-            new_hidden = []
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                output, self.hidden = self.shared_lstm(x, self.hidden)
-                self.hidden = tuple(v.detach() for v in self.hidden)
+            output, _ = self.shared_lstm(x, self.hidden)    # 输出 _ 包含(h_n,c_n)的tuple
 
-                sl,bs,_ = output.size()
-                avgpool = self.pool(output, bs, False)
-                mxpool = self.pool(output, bs, True)
-                x = torch.cat([output[-1], mxpool, avgpool], 1)
+            sl,bs,_ = output.size()
+            avgpool = self.pool(output, bs, False)
+            mxpool = self.pool(output, bs, True)
+            x = torch.cat([output[-1], mxpool, avgpool], 1)
         return x
 
     def forward(self, input):
@@ -3930,17 +3927,28 @@ class Siamese(nn.Module):
     def __init__(self, cfg):
         super(Siamese,self).__init__()
 
-        self.ndir = 1
+        self.bidir = True
+        self.ndir = 2 if self.bidir else 1# 双向LSTM，LSTM向量长度翻倍
         self.n_h = 100
         self.bs, self.qrnn = 1, False
-        self.shared_lstm = nn.LSTM(400,self.n_h)
+        dropouti = 0.65
+        dropouth = 0.3
+        wdrop=0.5
+        self.emb_sz = 400
+        self.n_layers = [self.ndir*d for d in [100, 80, 64, 64]]
+        self.rnns = [nn.LSTM(self.emb_sz if l == 0 else self.n_layers[l-1], self.n_layers[l]//self.ndir,
+            1, bidirectional=self.bidir) for l in range(len(self.n_layers))]
+        if wdrop: self.rnns = [WeightDrop(rnn, wdrop) for rnn in self.rnns]
+        self.dropouti = LockedDropout(dropouti)
+        self.rnns = torch.nn.ModuleList(self.rnns)
+        self.dropouths = nn.ModuleList([LockedDropout(dropouth) for l in range(len(self.n_layers))])
 
-    def one_hidden(self):
-        return Variable(self.weights.new(self.ndir, self.bs, self.n_h).zero_())
+    def one_hidden(self,l):
+        return Variable(self.weights.new(self.ndir, self.bs, self.n_layers[l]//self.ndir).zero_())
 
     def reset(self):
         self.weights = next(self.parameters()).data
-        self.hidden = (self.one_hidden(), self.one_hidden())
+        self.hidden = [(self.one_hidden(l), self.one_hidden(l)) for l in range(len(self.rnns))]
 
     def pool(self, x, bs, is_max):
         f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
@@ -3950,18 +3958,16 @@ class Siamese(nn.Module):
         sl,bs,_ = x.size()
         if bs!=self.bs:
             self.bs=bs
-        self.reset()
+            self.reset()
         with set_grad_enabled(self.training):
-            new_hidden = []
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                output, self.hidden = self.shared_lstm(x, self.hidden)
-                self.hidden = tuple(v.detach() for v in self.hidden)
-
-                sl,bs,_ = output.size()
-                avgpool = self.pool(output, bs, False)
-                mxpool = self.pool(output, bs, True)
-                x = torch.cat([output[-1], mxpool, avgpool], 1)
+            output = self.dropouti(x)
+            for l,(rnn, drop) in enumerate(zip(self.rnns, self.dropouths)):
+                output, _ = rnn(output, self.hidden[l])
+                if l != len(self.rnns) - 1: output = drop(output) 
+            sl,bs,_ = output.size()
+            avgpool = self.pool(output, bs, False)
+            mxpool = self.pool(output, bs, True)
+            x = torch.cat([output[-1], mxpool, avgpool], 1)
         return x
 
     def forward(self, input):
@@ -3987,10 +3993,39 @@ class Siamese(nn.Module):
 
 
 
+def soft_attention_alignment(a, b):
+    "Align text representation with neural soft attention"
+    e_ij = torch.bmm(a.permute(1,0,2), b.permute(1,2,0))
+    w_att_b = F.softmax(e_ij, dim=2)                   # a~ = softmax(attention,dim=1) * b_
+    w_att_a = F.softmax(e_ij, dim=1).transpose(1,2)    # b~ = softmax(e_ij,dim=2) * a_
+    a_aligned = torch.bmm(w_att_b, b.transpose(0,1)).transpose(0,1)
+    b_aligned = torch.bmm(w_att_a, a.transpose(0,1)).transpose(0,1)
+    return a_aligned, b_aligned
+
 class ESIM(nn.Module):
     """docstring for ESIM"""
     def __init__(self, cfg):
         super(ESIM, self).__init__()
+        self.bn = nn.BatchNorm1d(400)
+        self.encode = nn.LSTM(400,300)
+        self.compose = nn.LSTM(1200,300)
+        self.lin = nn.ModuleList([nn.Linear(1200, 300),nn.Linear(300, 300),nn.Linear(300, 1)])
+        self.drop = [nn.Dropout(0.5),nn.Dropout(0.5)]
+        self.bn2 = nn.ModuleList([nn.BatchNorm1d(1200), nn.BatchNorm1d(300), nn.BatchNorm1d(300)])
+        self.bs = 1
+        self.reset()
+
+
+    def one_hidden(self):
+        return Variable(self.weights.new(1, self.bs, 300).zero_())
+
+    def reset(self):
+        self.weights = next(self.parameters()).data
+        self.hidden = (self.one_hidden(), self.one_hidden())
+
+    def pool(self, x, bs, is_max):
+        f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
+        return f(x.permute(1,2,0), (1,)).view(bs,-1)
 
     def forward(self, input):
         l_output, r_output = input
@@ -3998,20 +4033,70 @@ class ESIM(nn.Module):
             l_raw_outputs, l_outputs = l_output
             r_raw_outputs, r_outputs = r_output
 
-            encoded_left = l_outputs[-1]
-            encoded_right = r_outputs[-1]
+            # embedding
+            q1_embed = l_outputs[-1]
+            q2_embed = r_outputs[-1]
+            # print("encoded_left", type(encoded_left), encoded_left.size())
 
-            left_output = self.forward_once(encoded_left)
-            right_output = self.forward_once(encoded_right)
+            sl,bs,_ = q1_embed.size()
+            if bs!=self.bs:
+                self.bs=bs
+                self.reset()
 
-            # 距离函数 exponent_neg_manhattan_distance
-            x = [left_output, right_output]
-            malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
-        return malstm_distance.view(-1), l_raw_outputs, l_outputs
+            q1_embed = self.bn(q1_embed.transpose(1,2)).transpose(1,2)
+            q2_embed = self.bn(q2_embed.transpose(1,2)).transpose(1,2)
+
+            # Encode
+            self.encode.flatten_parameters()
+            q1_encoded, _ = self.encode(q1_embed, self.hidden)
+            q2_encoded, _ = self.encode(q2_embed, self.hidden)
+
+            # print("q1_encoded", type(q1_encoded), q1_encoded.size())
+            # Attention
+            q1_aligned, q2_aligned = soft_attention_alignment(q1_encoded, q2_encoded)
+
+            # print("q1_aligned", type(q1_aligned), q1_aligned.size())
+
+            # Compose
+            q1_combined = torch.cat([q1_encoded, q1_aligned, torch.sub(q1_encoded, q1_aligned), torch.mul(q1_encoded, q1_aligned)],dim=2)
+            q2_combined = torch.cat([q2_encoded, q2_aligned, torch.sub(q2_encoded, q2_aligned), torch.mul(q2_encoded, q2_aligned)],dim=2)
+
+            # print("q1_combined", type(q1_combined), q1_combined.size())
+
+            self.compose.flatten_parameters()
+            q1_compare, _ = self.compose(q1_combined, self.hidden)
+            q2_compare, _ = self.compose(q2_combined, self.hidden)
+    
+            # print("q1_compare", type(q1_compare), q1_compare.size())
+
+            # Aggregate
+            q1_rep = torch.cat([self.pool(q1_compare, self.bs, False), self.pool(q1_compare, self.bs, True)], dim=1)
+            q2_rep = torch.cat([self.pool(q2_compare, self.bs, False), self.pool(q2_compare, self.bs, True)], dim=1)
+
+            # print("q1_rep", type(q1_rep), q1_rep.size())
+            # Classifier
+            dense = torch.cat([q1_rep, q2_rep],dim=1)
 
 
-        
+            # print("dense", type(dense), dense.size())
+            dense = self.bn2[0](dense)
+            dense = self.lin[0](dense)
+            # print("dense0", type(dense), dense.size())
+            dense = torch.nn.functional.elu(dense)
+            dense = self.bn2[1](dense)
+            dense = self.drop[0](dense)
+            dense = self.lin[1](dense)
+            # print("dense1", type(dense), dense.size())
+            dense = torch.nn.functional.elu(dense)
+            dense = self.bn2[2](dense)
+            dense = self.drop[1](dense)
+            dense = self.lin[2](dense)
+            # print("dense2", type(dense), dense.size())
+            output = torch.sigmoid(dense)
+            # print("output", type(output), output.size())
+            # torch.cuda.empty_cache() # 释放GPU内存很慢，一般不必要
 
+        return output.view(-1), l_raw_outputs, l_outputs
 
 
 def get_rnn_classifier_similar(similar, bptt, max_seq, n_class, n_tok, emb_sz, n_hid, n_layers, pad_token, layers, drops, bidir=False,
@@ -4040,7 +4125,9 @@ class Double_Learner(Learner):
     def _get_crit(self, data): return F.binary_cross_entropy
     def fit(self, *args, **kwargs): return super().fit(*args, **kwargs, seq_first=True)
 
-    def save_encoder(self, name): save_model(self.model[0].rnn_enc, self.get_model_path(name))
+    def save_encoder(self, name): 
+        save_model(self.model[0], self.get_model_path(name))
+        if hasattr(self, "swa_model"): save_model(self.swa_model[0], self.get_model_path(name[:-4]+"-swa"+name[-4:]))
     def load_encoder(self, name): load_model(self.model[0].rnn_enc, self.get_model_path(name))
 
 
@@ -4089,15 +4176,14 @@ class Double_DataLoader(DataLoader):
 
 
 def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards=False, startat=0, unfreeze=True,
-               lr=0.01, dropmult=1.0, bpe=False, use_clr=True,
+               lr=0.01, dropmult=1.0, bpe=False, use_clr=True, early_stopping=True,
                use_regular_schedule=False, use_discriminative=True, last=False, chain_thaw=False,
-               from_scratch=False, train_file_id='',dtype="char"):
-    print(f"======= train_clas {similar} {dtype} ========")
-    print(f'dir_path {dir_path}; similar {similar}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
-        f'dropmult {dropmult} unfreeze {unfreeze} startat {startat}; bpe {bpe}; use_clr {use_clr};'
+               from_scratch=False, train_file_id='',dtype="char", load_learn=False):
+    print(f'=== train_clas: dir_path {dir_path}; similar {similar}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
+        f'dropmult {dropmult} unfreeze {unfreeze} startat {startat}; bpe {bpe}; use_clr {use_clr}; early stopping {early_stopping}'
         f'use_regular_schedule {use_regular_schedule}; use_discriminative {use_discriminative}; last {last};'
         f'chain_thaw {chain_thaw}; from_scratch {from_scratch}; train_file_id {train_file_id};'
-        f'dtype {dtype}')
+        f'dtype {dtype}; load_learn {load_learn}')
     if not hasattr(torch._C, '_cuda_setDevice'):
         print('CUDA not available. Setting device=-1.')
         cuda_id = -1
@@ -4112,7 +4198,7 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
     clas_id = clas_id if clas_id == '' else f'{clas_id}_'
     intermediate_clas_file = f'{PRE}{clas_id}clas_0_{dtype}'
     final_clas_file = f'{PRE}{clas_id}clas_1_{dtype}'
-    lm_file = f'{PRE}{lm_id}lm_{dtype}_enc'
+    lm_file = f'{PRE}{lm_id}lm_{dtype}-swa_enc'     # swa 版本更好
     lm_path = dir_path + "/" + 'models' + "/" + f'{lm_file}.h5'
     assert os.path.exists(lm_path), f'Error: {lm_path} does not exist.'
 
@@ -4164,6 +4250,10 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
     learn.reg_fn = partial(seq2seq_reg, alpha=2, beta=1)
     learn.clip=25.
     learn.metrics = [f1_np]
+
+    if load_learn:
+        learn.load(final_clas_file)
+        return learn
 
     lrm = 2.6
     if use_discriminative:
@@ -4223,90 +4313,16 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
         cl = None
     else:
         n_cycles = 1
-    learn.fit(lrs, n_cycles, wds=wd, cycle_len=cl, use_clr=(8,8) if use_clr else None)
+
+    callbacks = []
+    if early_stopping:
+        callbacks.append(EarlyStopping(learn, final_clas_file, patience=5))
+        print('Using early stopping...')
+    learn.fit(lrs, n_cycles, wds=wd, cycle_len=cl, use_clr=(8,8) if use_clr else None, callbacks=callbacks)
+
     print('Plotting lrs...')
     # learn.sched.plot_lr()
     learn.save(final_clas_file)
-
-def load_learn(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, backwards=False, startat=0, unfreeze=True,
-               lr=0.01, dropmult=1.0, bpe=False, use_clr=True,
-               use_regular_schedule=False, use_discriminative=True, last=False, chain_thaw=False,
-               from_scratch=False, train_file_id='',dtype="char"):
-    print(f"======= load_model {similar} {dtype} ========")
-    print(f'dir_path {dir_path}; similar {similar}; cuda_id {cuda_id}; lm_id {lm_id}; clas_id {clas_id}; bs {bs}; cl {cl}; backwards {backwards}; '
-        f'dropmult {dropmult} unfreeze {unfreeze} startat {startat}; bpe {bpe}; use_clr {use_clr};'
-        f'use_regular_schedule {use_regular_schedule}; use_discriminative {use_discriminative}; last {last};'
-        f'chain_thaw {chain_thaw}; from_scratch {from_scratch}; train_file_id {train_file_id};'
-        f'dtype {dtype}')
-    if not hasattr(torch._C, '_cuda_setDevice'):
-        print('CUDA not available. Setting device=-1.')
-        cuda_id = -1
-    torch.cuda.set_device(cuda_id)
-
-    PRE = 'bwd_' if backwards else 'fwd_'
-    PRE = 'bpe_' + PRE if bpe else PRE
-    IDS = 'bpe' if bpe else 'ids'
-    train_file_id = train_file_id if train_file_id == '' else f'_{train_file_id}'
-    lm_id = lm_id if lm_id == '' else f'{lm_id}_'
-    clas_id = lm_id if clas_id is None else clas_id
-    clas_id = clas_id if clas_id == '' else f'{clas_id}_'
-    intermediate_clas_file = f'{PRE}{clas_id}clas_0_{dtype}'
-    final_clas_file = f'{PRE}{clas_id}clas_1_{dtype}'
-    lm_file = f'{PRE}{lm_id}lm_{dtype}_enc'
-    lm_path = dir_path + "/" + 'models' + "/" + f'{lm_file}.h5'
-    assert os.path.exists(lm_path), f'Error: {lm_path} does not exist.'
-
-    bptt,em_sz,nh,nl = 70,400,1150,3
-    opt_fn = partial(optim.Adam, betas=(0.8, 0.99))
-
-    if backwards:
-        trn_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'trn_{IDS}{train_file_id}_{dtype}_bwd.npy')
-        val_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'val_{IDS}_{dtype}_bwd.npy')
-    else:
-        trn_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'trn_{IDS}{train_file_id}_{dtype}.npy')
-        val_sent = np.load(dir_path + "/" + 'tmp' + "/" + f'val_{IDS}_{dtype}.npy')
-
-    trn_lbls = np.load(dir_path + "/" + 'tmp' + "/" + f'lbl_trn{train_file_id}.npy')
-    val_lbls = np.load(dir_path + "/" + 'tmp' + "/" + f'lbl_val.npy')
-    print(dir_path + "/" + 'tmp' + "/" + f'lbl_trn{train_file_id}_{dtype}.npy')
-    print(dir_path + "/" + 'tmp' + "/" + f'lbl_val_{dtype}.npy')
-    trn_sent, val_sent = trn_sent.reshape(-1,2), val_sent.reshape(-1,2)
-    print(trn_sent.shape, val_sent.shape)
-    print(trn_lbls.shape, val_lbls.shape)
-    trn_lbls = trn_lbls.astype(np.float32)
-    val_lbls = val_lbls.astype(np.float32)
-    c=int(trn_lbls.max())+1
-
-    if bpe: vs=30002
-    else:
-        itos = pickle.load(open(dir_path + "/" + 'tmp' + "/" + f'itos_{dtype}.pkl', 'rb'))
-        vs = len(itos)
-
-    trn_ds = Double_TextDataset(trn_sent[:,0], trn_sent[:,1], trn_lbls)
-    val_ds = Double_TextDataset(val_sent[:,0], val_sent[:,1], val_lbls)
-    trn_samp = SortishSampler(trn_sent, key=lambda x: len(trn_sent[x]), bs=bs//2)
-    val_samp = SortSampler(val_sent, key=lambda x: len(val_sent[x]))
-    trn_dl = Double_DataLoader(trn_ds, bs//2, transpose=True, num_workers=1, pad_idx=1, sampler=trn_samp)
-    val_dl = Double_DataLoader(val_ds, bs, transpose=True, num_workers=1, pad_idx=1, sampler=val_samp)
-
-    md = ModelData(dir_path, trn_dl, val_dl)
-
-    dps = np.array([0.4,0.5,0.05,0.3,0.4])*dropmult
-    #dps = np.array([0.5, 0.4, 0.04, 0.3, 0.6])*dropmult
-    #dps = np.array([0.65,0.48,0.039,0.335,0.34])*dropmult
-    #dps = np.array([0.6,0.5,0.04,0.3,0.4])*dropmult
-
-    m = get_rnn_classifier_similar(similar, bptt, 20*70, c, vs, emb_sz=em_sz, n_hid=nh, n_layers=nl, pad_token=1,
-              layers=[em_sz*3, 50, c], drops=[dps[4], 0.1],
-              dropouti=dps[0], wdrop=dps[1], dropoute=dps[2], dropouth=dps[3])
-
-    learn = Double_Learner(md, Double_Model(to_gpu(m)), opt_fn=opt_fn)
-    learn.reg_fn = partial(seq2seq_reg, alpha=2, beta=1)
-    learn.clip=25.
-    learn.metrics = [f1_np]
-
-    learn.load(final_clas_file)
-    return learn
 
 
 def r_f1_thresh(y_pred,y_true):
@@ -4323,16 +4339,31 @@ def r_f1_thresh(y_pred,y_true):
 
 
 def eval_learn(learn):
-    y_pred = learn.predict()
-
     val_lbls = np.load(model_dir + "atec" + "/" + 'tmp' + "/" + f'lbl_val.npy')
     y_true = val_lbls.astype(np.float32)
 
+    y_pred = learn.predict(use_swa=False)
+    print(r_f1_thresh(y_pred,y_true))
+    y_pred = learn.predict(use_swa=True)
     print(r_f1_thresh(y_pred,y_true))
 
+def prepare_data():
+    # pretrain language model
+    articles = 25000
+    if online: articles *= 5
+    create_lm_csv("wiki", articles=articles)
+    # finetune language model
+    create_lm_csv("atec")
+    for dtype in ["char", "word"]:
+        for backwards in [True, False]:
+            create_toks(model_dir+"wiki", dtype, backwards)
+            tok2id(model_dir+"wiki", 300000, 5, dtype, backwards)
+            create_toks(model_dir+"atec", dtype, backwards)
+            tok2id(model_dir+"atec", 100000, 5, dtype, backwards)
+    # train class model
+    create_ids_lbls()
 
-
-def main(dtypes, bss):
+def main():
     # transform_weight(cfgs[0])
     # transform_weight(cfgs[1])
     # transform_weight_npy(cfgs[0])
@@ -4347,71 +4378,86 @@ def main(dtypes, bss):
     # transform_wiki()
     # [transform_weight_npy2(cfg,ebed_type) for cfg in cfgs for ebed_type in ["fastskip", "fastcbow"]]
 
-    def step1():
-        '''step1. 训练一个语言模型'''
-        for dtype,bs in zip(dtypes,bss):
-            '''准备数据'''
-            if False:
-                create_lm_csv("wiki", dtype, n_tokens=10000000)
-                create_toks(model_dir+"wiki", dtype=dtype)
-                tok2id(model_dir+"wiki",max_vocab=100000,dtype=dtype)
+    similar_cls = Siamese
+    def step1(dtype, backwards):    # 训练一个语言模型
+        '''训练语言模型，精度：    4epoch，4*12391次迭代，char_bwd=0.350832'''
+        '''online训练语言模型，精度： 2epoch char_bwd = 0.389244  char_fwd = 0.396402          char = 0.414632 , word = * '''
+        start = time.time()
+        pretrain_lm(model_dir+"wiki", cuda_id=0,lr=1e-3, cl = 4, preload=False, dtype=dtype, backwards=backwards) # cl=12
+        print("pretrain lm used:%f"%(time.time() - start))
 
-            '''训练语言模型，精度：    char = 0.319606 , word = 0.30 '''
-            # bs = 32
-            pretrain_lm(model_dir+"wiki", cuda_id=0,lr=1e-3, cl = 12, bs = bs, dtype=dtype)
-            #pretrain_lm(model_dir+"wiki", cuda_id=0, lr=1e-3, cl = 1, bs = bs,dtype=dtype)
+    def step2(dtype, backwards):    # finetune当前语言模型
+        '''finetune语言模型，精度：   25epoch 25*745次迭代，char_bwd=0.65192   最佳纪录char_fwd = 0.652922'''
+        start = time.time()
+        finetune_lm(model_dir+"atec", model_dir+"wiki", cuda_id=0, cl=17, dtype=dtype, backwards=backwards, preload=True, startat=0) # cl=25
+        print("finetune lm used:%f"%(time.time() - start))
 
-    def step2():
-        '''step2. finetune当前语言模型'''
-        for dtype,bs in zip(dtypes,bss):
-            '''准备数据'''
-            if False:
-                create_lm_csv("atec", dtype)
-                create_toks(model_dir+"atec", dtype=dtype)
-                tok2id(model_dir+"atec",max_vocab=100000,dtype=dtype)
+    def step3(dtype, backwards):    # 基于语言模型训练分类器
+        '''训练分类器， 精度：  2+6epoch 0.494 42min'''
+        start = time.time()
+        train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=15, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
+        print("train clas lm used:%f"%(time.time() - start))
 
-            '''finetune语言模型，精度：   char = 0.652922'''
-            # bs = 32
-            finetune_lm(model_dir+"atec", model_dir+"wiki", cuda_id=0, cl=25, bs=bs, dtype=dtype)
-            #finetune_lm(model_dir+"atec", model_dir+"wiki", cuda_id=0, cl=1, bs=bs, dtype=dtype)
+    def find_best_thr(dtype, backwards):
+        learn = train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=1, dtype=dtype, backwards=backwards, load_learn=True)
+        eval_learn(learn)
 
-    def step3():
-        '''step3. 基于语言模型训练分类器'''
+    def get_result(dtype, backwards):
+        if not online: df1 = pd.read_csv(model_dir+"atec_nlp_sim_train.csv",sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
+        if online: best_threshold = 0.296
+        else: best_threshold = 0.296
 
-        '''准备数据'''
-        if False:
-            create_ids_lbls()
+        val_sent = np.hstack([np.array(df1["sent1"]).reshape(-1,1), np.array(df1["sent2"]).reshape(-1,1)]).reshape(-1)
+        val_sent = sent_token2id(val_sent, model_dir+"atec", dtype, backwards).reshape(-1, 2)
+        val_ds = Double_TextDataset(val_sent[:,0], val_sent[:,1], np.ones(val_sent.shape[0]))
+        val_samp = SortSampler(val_sent, key=lambda x: len(val_sent[x]))
+        val_dl = Double_DataLoader(val_ds, bs=64, transpose=True, num_workers=1, pad_idx=1, sampler=val_samp)
+        learn = train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=1, dtype=dtype, backwards=backwards, load_learn=True)
+        result = learn.predict_dl(val_dl,use_swa=False)
+        result = result > best_threshold
+        print(sum(result))
+        result = learn.predict_dl(val_dl,use_swa=True)
+        result = result > best_threshold
+        print(sum(result))
+        df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
+        if online: topai(1,df_output)
+        else: print(df_output)
 
-        for dtype,bs in zip(dtypes,bss):
-            '''训练分类器'''
-            # bs = 32
-            # train_clas(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=50, bs=bs, dtype=dtype)
-            train_clas(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=1, bs=bs, dtype=dtype)
+    dtype, backwards = "char",True
+    # dtype, backwards = "char",False
+    # dtype, backwards = "word",True
+    # dtype, backwards = "word",False
+    
+    # step1(dtype,backwards)
+    # step2(dtype,backwards)
+    step3(dtype,backwards)
+    # find_best_thr(dtype,backwards)
+    # get_result(dtype,backwards)
 
-    def find_best_thr():
-        for dtype,bs in zip(dtypes,bss):
-            learn = load_learn(model_dir+"atec", Siamese_Baseline, cuda_id=0, cl=1, bs=bs, dtype=dtype)
-            eval_learn(learn)
 
-    # step1()
-    # step2()
-    # step3()
-    find_best_thr()
-        
 
-if __name__ == '__main__':    
-    dtypes = ["char"]
-    bss = [600]
-    main(dtypes,bss)
+if __name__ == '__main__':  
+    # prepare_data()
+    main()
+    # 清除不用的GPU缓存，使Keras有显存可用
+    torch.cuda.empty_cache()
+    
+
 
 '''
-载入训练好的模型，处理验证集数据得到预测值
-处理新的文本数据得到预测值
-模型最优f1评分的阈值
-
-两个rnn编码网络的loss正则项进行平均
-use_swa=True怎么用
 构建之前的siamese和esim，输入为400*3维
 sortish 两个输入的排序问题
+训练过程断点继续
+训练backward语言模型和分类器
+看下复赛中增加了哪些细粒度特征
 
+两个rnn编码网络的loss正则项进行平均
+
+
+5种不同的模型：
+InferSent(句子编码模型)
+Shortcut-Stacked Sentence Encoder Model(SSEM)(句子编码模型)
+Pairwise Word Interaction Model(PWIM)(句对交互模型)
+Decomposable Attention Model(DecAtt)(句对交互模型)
+Enhanced Sequential Inference Model(ESIM)(句对交互模型)
 '''
