@@ -84,10 +84,6 @@ cfgs = [
     ("dssm",    "both", [20,24], ebed_type,  w2v_length, [],           124-8, earlystop_patience), # 55s
 ]
 
-combines, num_models = [],len(cfgs)
-for i in range(1,num_models+1):
-    combines.extend([list(c) for c in combinations(range(num_models), i)])
-
 new_words = "支付宝 付款码 二维码 收钱码 转账 退款 退钱 余额宝 运费险 还钱 还款 花呗 借呗 蚂蚁花呗 蚂蚁借呗 蚂蚁森林 小黄车 飞猪 微客 宝卡 芝麻信用 亲密付 淘票票 饿了么 摩拜 滴滴 滴滴出行".split(" ")
 for word in new_words:
     jieba.add_word(word)
@@ -612,8 +608,10 @@ class SWA(Callback):
         # update running average of parameters
         alpha = 1./(self.swa_n + 1)
         for layer,swa_layer in zip(self.model.layers, self.swa_model.layers):
-            weights = (1-alpha)*swa_layer.get_weights() + alpha*layer.get_weights()
-            swa_layer.set(weights)
+            weights = []
+            for w1,w2 in zip(swa_layer.get_weights(), layer.get_weights()):
+                weights.append( (1-alpha)*w1 + alpha*w2)
+            swa_layer.set_weights(weights)
 
 class LR_Updater(Callback):
     '''
@@ -762,10 +760,11 @@ def train_model(model, swa_model, cfg):
 
     init_lrs = 0.001
     clr_div,cut_div = 10, 8
-    batch_num = (len(train_x)-1) // train_batch_size + 1
+    batch_num = (train_x[0].shape[0]-1) // train_batch_size + 1
     cycle_len = 1
     total_iterators = batch_num*cycle_len
-    circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div,)
+    print(total_iterators)
+    circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div)
     callbacks = [checkpoint, earlystop, swa_cbk, circular_lr]
 
 
@@ -780,10 +779,10 @@ def train_model(model, swa_model, cfg):
 
     loss,metrics = 'binary_crossentropy',['binary_crossentropy',"accuracy"]
 
-    model.compile(optimizer=Adam(lr=init_lrs, beta1=0.8), loss=loss, metrics=metrics)
+    model.compile(optimizer=Adam(lr=init_lrs, beta_1=0.8), loss=loss, metrics=metrics)
     fit()
 
-    filepath_swa = "swa_"+filepath
+    filepath_swa = model_dir + filepath.split("/")[-1].split(".")[0]+"-swa.h5"
     swa_cbk.swa_model.save_weights(filepath_swa)
 
     # 保存配置，方便多模型集成
@@ -815,10 +814,12 @@ def save_config(filepath, cfg):
     configs[filepath] = cfg
     open(configs_path,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
 
+evaluate_path = model_dir + "y_pred.pkl"
 def evaluate_models():
     train_y_preds, test_y_preds = [], []
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
+
     for weight, cfg in all_cfgs.items():
         model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg   
         data = load_data(dtype, input_length, w2v_length)
@@ -828,18 +829,30 @@ def evaluate_models():
         test_y_preds.append(model.predict(test_x, batch_size=test_batch_size).reshape(-1))
 
     train_y_preds,test_y_preds = np.array(train_y_preds),np.array(test_y_preds)
-    pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],model_dir + "y_pred.pkl")
+    pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],evaluate_path)
 
-def find_out_combine_mean():
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
-    with open(model_dir + "combine.txt","w",encoding="utf8") as log:
+def find_out_combine_mean(use_combine=False):
+    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(evaluate_path)
+    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
+    num_clfs = len(all_cfgs)
+    combine_path = model_dir + "combine"+time.strftime("_%m-%d %H-%M-%S")+".txt"
+    with open(combine_path, "w", encoding="utf8") as log:
+        combines, num_clfs = [],len(cfgs)
+        max_clfs = num_clfs if use_combine else 1
+        for i in range(1,max_clfs+1):
+            combines.extend([list(c) for c in combinations(range(num_clfs), i)])
+
+        for index, weight in enumerate(list(all_cfgs)):
+            log.write(f"[{index}]\t{weight}\n")
+        log.write("\n")
+
         for cb in combines:
             test_y_pred = test_y_preds[cb].mean(axis=0)     # 选择模型组合的结果进行平均
             test_log = r_f1_thresh(test_y_pred, test_y)
-            print(cb)
-            print("test  phrase:",test_log)
+            print(cb," \t",test_log)
             log.write("\t".join([str(cb),"\t".join(map(str,test_log))])+"\n")
-    lines = open(model_dir+'combine.txt','r',encoding='utf8').readlines()
+
+    lines = open(combine_path,'r',encoding='utf8').readlines()
     lines = [line.strip() for line in lines]
     for i in range(len(lines)//2+1):
         if 2*i+1<len(lines):
@@ -848,7 +861,7 @@ def find_out_combine_mean():
             print(lines[2*i])
 
 def get_error_sample():
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
+    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(evaluate_path)
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     for model_path in all_cfgs.keys():
         index = list(all_cfgs).index(model_path)
@@ -864,55 +877,43 @@ def get_error_sample():
 blending_path = model_dir + "blending_gdbm.pkl"
 def train_blending():
     """ 根据配置文件和验证集的值计算融合模型 """
-    train_y_preds,train_y,org_valid_preds,org_valid_y = pd.read_pickle(model_dir + "y_pred.pkl")
+    train_y_preds,train_y,valid_y_preds,valid_y = pd.read_pickle(evaluate_path)
     train_y_preds = train_y_preds.T
-    org_valid_preds = org_valid_preds.T
-
+    valid_y_preds = valid_y_preds.T
 
     '''融合使用的模型'''
-    for clf in [LogisticRegression(),
-                LogisticRegressionCV(),
-                GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30),]:
-        print(clf)
-        for random_state in range(5):
-            valid_y_preds, test_y_preds, valid_y, test_y = train_test_split(org_valid_preds, org_valid_y, test_size=0.55, random_state=random_state)
-            clf.fit(valid_y_preds, valid_y)
-            print("group", random_state)
-            train_y_preds_blend = clf.predict_proba(train_y_preds)[:,1]
-            r,f1,train_thresh = r_f1_thresh(train_y_preds_blend, train_y)
-
-            valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
-            r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
-
-            test_y_preds_blend = clf.predict_proba(test_y_preds)[:,1]
-            v1 = f1_score(test_y_preds_blend>train_thresh, test_y), 
-            v2 = f1_score(test_y_preds_blend>valid_thresh, test_y)
-            print(v1,v2, v1>v2)
-
-            pd.to_pickle((valid_thresh,clf), blending_path)
+    clf = LogisticRegressionCV()
+    clf.fit(valid_y_preds, valid_y)
+    valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
+    r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
+    pd.to_pickle((valid_thresh,clf), blending_path)
 
 #####################################################################
 #                         输出结果
 #####################################################################
 
 def result():
-    # online = False
     if not online: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
   
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
     test_y_preds = []
+    X = {}
+    for cfg in all_cfgs.values():
+        model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
+        key_ = f"{dtype}_{input_length}"
+        if key_ not in X: X[key_] = input_data(df1["sent1"],df1["sent2"], dtype = dtype, input_length=input_length)
+
     for weight, cfg in all_cfgs.items():
         K.clear_session()
         model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
-        data = load_data(dtype, input_length, w2v_length)
-        X = input_data(df1["sent1"],df1["sent2"], dtype =dtype, input_length=input_length)
+        key_ = f"{dtype}_{input_length}"
         model = get_model(cfg, weight)
-        test_y_preds.append(model.predict(X, batch_size=test_batch_size).reshape(-1))
+        test_y_preds.append(model.predict(X[key_], batch_size=test_batch_size).reshape(-1))
 
     test_y_preds = np.array(test_y_preds).T
     thresh,clf = pd.read_pickle(blending_path)
-    result = clf.predict_proba(test_y_preds).reshape(-1)>thresh
+    result = clf.predict_proba(test_y_preds)[:,1].reshape(-1)>thresh
 
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
     if online: topai(1,df_output)
@@ -925,9 +926,9 @@ def result():
 #     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
 #     save_config(model_dir + f"{model_type}_{dtype}.h5",cfg)
 
-# train_all_models([0:7])
-# evaluate_models()
-# find_out_combine_mean()
+# train_all_models(range(7))
+evaluate_models()
+# find_out_combine_mean(False)
 # get_error_sample()
 train_blending()
 result()
