@@ -2072,7 +2072,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
             avg_loss = avg_loss * avg_mom + loss * (1-avg_mom)
             debias_loss = avg_loss / (1 - avg_mom**batch_num)
 
-            print(f"batch: {index+1} / {num_batch} loss={debias_loss}")
+            # print(f"batch: {index+1} / {num_batch} loss={debias_loss}")
 
             # if index>3: batch_num = 10e10
             stop=False
@@ -3886,7 +3886,6 @@ class Siamese_Baseline(nn.Module):
             self.reset()
         with set_grad_enabled(self.training):
             output, _ = self.shared_lstm(x, self.hidden)    # 输出 _ 包含(h_n,c_n)的tuple
-
             sl,bs,_ = output.size()
             avgpool = self.pool(output, bs, False)
             mxpool = self.pool(output, bs, True)
@@ -3915,6 +3914,7 @@ class Siamese_Baseline(nn.Module):
             # 距离函数 exponent_neg_manhattan_distance
             x = [left_output, right_output]
             malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
+            
         return malstm_distance.view(-1), l_raw_outputs, l_outputs
 
 
@@ -3926,48 +3926,20 @@ class Siamese_Baseline(nn.Module):
 class Siamese(nn.Module):
     def __init__(self, cfg):
         super(Siamese,self).__init__()
-
-        self.bidir = True
-        self.ndir = 2 if self.bidir else 1# 双向LSTM，LSTM向量长度翻倍
-        self.n_h = 100
-        self.bs, self.qrnn = 1, False
-        dropouti = 0.65
-        dropouth = 0.3
-        wdrop=0.5
-        self.emb_sz = 400
-        self.n_layers = [self.ndir*d for d in [100, 80, 64, 64]]
-        self.rnns = [nn.LSTM(self.emb_sz if l == 0 else self.n_layers[l-1], self.n_layers[l]//self.ndir,
-            1, bidirectional=self.bidir) for l in range(len(self.n_layers))]
-        if wdrop: self.rnns = [WeightDrop(rnn, wdrop) for rnn in self.rnns]
-        self.dropouti = LockedDropout(dropouti)
-        self.rnns = torch.nn.ModuleList(self.rnns)
-        self.dropouths = nn.ModuleList([LockedDropout(dropouth) for l in range(len(self.n_layers))])
-
-    def one_hidden(self,l):
-        return Variable(self.weights.new(self.ndir, self.bs, self.n_layers[l]//self.ndir).zero_())
-
-    def reset(self):
-        self.weights = next(self.parameters()).data
-        self.hidden = [(self.one_hidden(l), self.one_hidden(l)) for l in range(len(self.rnns))]
+        self.lstm = nn.LSTM(400,64,2,bidirectional=False)
 
     def pool(self, x, bs, is_max):
         f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
         return f(x.permute(1,2,0), (1,)).view(bs,-1)
 
     def forward_once(self, x):
-        sl,bs,_ = x.size()
-        if bs!=self.bs:
-            self.bs=bs
-            self.reset()
         with set_grad_enabled(self.training):
-            output = self.dropouti(x)
-            for l,(rnn, drop) in enumerate(zip(self.rnns, self.dropouths)):
-                output, _ = rnn(output, self.hidden[l])
-                if l != len(self.rnns) - 1: output = drop(output) 
-            sl,bs,_ = output.size()
-            avgpool = self.pool(output, bs, False)
-            mxpool = self.pool(output, bs, True)
-            x = torch.cat([output[-1], mxpool, avgpool], 1)
+            x.requires_grad_()
+            x,_ = self.lstm(x)
+            sl,bs,_ = x.size()
+            avgpool = self.pool(x, bs, False)
+            mxpool = self.pool(x, bs, True)
+            x = torch.cat([x[-1], mxpool, avgpool], 1)
         return x
 
     def forward(self, input):
@@ -3983,14 +3955,9 @@ class Siamese(nn.Module):
             right_output = self.forward_once(encoded_right)
 
             # 距离函数 exponent_neg_manhattan_distance
-            x = [left_output, right_output]
-            malstm_distance = torch.exp(-torch.sum(torch.abs(x[0] - x[1]), dim=1, keepdim=True))
+            malstm_distance = torch.exp(-torch.sum(torch.abs(left_output - right_output), dim=1, keepdim=True))
+        
         return malstm_distance.view(-1), l_raw_outputs, l_outputs
-
-
-
-
-
 
 
 def soft_attention_alignment(a, b):
@@ -4013,15 +3980,6 @@ class ESIM(nn.Module):
         self.drop = [nn.Dropout(0.5),nn.Dropout(0.5)]
         self.bn2 = nn.ModuleList([nn.BatchNorm1d(1200), nn.BatchNorm1d(300), nn.BatchNorm1d(300)])
         self.bs = 1
-        self.reset()
-
-
-    def one_hidden(self):
-        return Variable(self.weights.new(1, self.bs, 300).zero_())
-
-    def reset(self):
-        self.weights = next(self.parameters()).data
-        self.hidden = (self.one_hidden(), self.one_hidden())
 
     def pool(self, x, bs, is_max):
         f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
@@ -4039,17 +3997,12 @@ class ESIM(nn.Module):
             # print("encoded_left", type(encoded_left), encoded_left.size())
 
             sl,bs,_ = q1_embed.size()
-            if bs!=self.bs:
-                self.bs=bs
-                self.reset()
-
-            q1_embed = self.bn(q1_embed.transpose(1,2)).transpose(1,2)
-            q2_embed = self.bn(q2_embed.transpose(1,2)).transpose(1,2)
+            if bs!=self.bs: self.bs=bs
 
             # Encode
             self.encode.flatten_parameters()
-            q1_encoded, _ = self.encode(q1_embed, self.hidden)
-            q2_encoded, _ = self.encode(q2_embed, self.hidden)
+            q1_encoded, _ = self.encode(q1_embed)
+            q2_encoded, _ = self.encode(q2_embed)
 
             # print("q1_encoded", type(q1_encoded), q1_encoded.size())
             # Attention
@@ -4064,8 +4017,8 @@ class ESIM(nn.Module):
             # print("q1_combined", type(q1_combined), q1_combined.size())
 
             self.compose.flatten_parameters()
-            q1_compare, _ = self.compose(q1_combined, self.hidden)
-            q2_compare, _ = self.compose(q2_combined, self.hidden)
+            q1_compare, _ = self.compose(q1_combined)
+            q2_compare, _ = self.compose(q2_combined)
     
             # print("q1_compare", type(q1_compare), q1_compare.size())
 
@@ -4122,7 +4075,7 @@ class Double_Learner(Learner):
     def __init__(self, data, models, **kwargs):
         super().__init__(data, models, **kwargs)
 
-    def _get_crit(self, data): return F.binary_cross_entropy
+    def _get_crit(self, data): return F.binary_cross_entropy  # F.mse_loss
     def fit(self, *args, **kwargs): return super().fit(*args, **kwargs, seq_first=True)
 
     def save_encoder(self, name): 
@@ -4315,7 +4268,7 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
         n_cycles = 1
 
     callbacks = []
-    if early_stopping:
+    if False and early_stopping:
         callbacks.append(EarlyStopping(learn, final_clas_file, patience=5))
         print('Using early stopping...')
     learn.fit(lrs, n_cycles, wds=wd, cycle_len=cl, use_clr=(8,8) if use_clr else None, callbacks=callbacks)
@@ -4363,7 +4316,7 @@ def prepare_data():
     # train class model
     create_ids_lbls()
 
-def main():
+def main(similar_cls):
     # transform_weight(cfgs[0])
     # transform_weight(cfgs[1])
     # transform_weight_npy(cfgs[0])
@@ -4378,7 +4331,7 @@ def main():
     # transform_wiki()
     # [transform_weight_npy2(cfg,ebed_type) for cfg in cfgs for ebed_type in ["fastskip", "fastcbow"]]
 
-    similar_cls = Siamese
+    
     def step1(dtype, backwards):    # 训练一个语言模型
         '''训练语言模型，精度：    4epoch，4*12391次迭代，char_bwd=0.350832'''
         '''online训练语言模型，精度： 2epoch char_bwd = 0.389244  char_fwd = 0.396402          char = 0.414632 , word = * '''
@@ -4395,7 +4348,7 @@ def main():
     def step3(dtype, backwards):    # 基于语言模型训练分类器
         '''训练分类器， 精度：  2+6epoch 0.494 42min'''
         start = time.time()
-        train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=15, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
+        train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=25, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
         print("train clas lm used:%f"%(time.time() - start))
 
     def find_best_thr(dtype, backwards):
@@ -4431,18 +4384,29 @@ def main():
     # step1(dtype,backwards)
     # step2(dtype,backwards)
     step3(dtype,backwards)
-    # find_best_thr(dtype,backwards)
+    find_best_thr(dtype,backwards)
     # get_result(dtype,backwards)
 
 
 
 if __name__ == '__main__':  
     # prepare_data()
-    main()
+    # 
+    
+    similar_cls = ESIM
+    main(similar_cls)
+    # 清除不用的GPU缓存，使Keras有显存可用
+    torch.cuda.empty_cache()
+
+    similar_cls = Siamese
+    main(similar_cls)
     # 清除不用的GPU缓存，使Keras有显存可用
     torch.cuda.empty_cache()
     
-
+    similar_cls = Siamese_Baseline
+    main(similar_cls)
+    # 清除不用的GPU缓存，使Keras有显存可用
+    torch.cuda.empty_cache()
 
 '''
 构建之前的siamese和esim，输入为400*3维
