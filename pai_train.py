@@ -46,8 +46,8 @@ except:
     test_size = 0.05
     online=False
 
+w2v_length = 300 if online else 256
 
-w2v_length = 300
 ebed_type = "gensim"
 # ebed_type = "fastcbow"
 
@@ -736,7 +736,7 @@ def r_f1_thresh(y_pred,y_true):
     e[:,0] = y_pred.reshape(-1)
     e[:,1] = y_true
     f = pd.DataFrame(e)
-    m1,m2,fact = 0,1000,1000
+    m1,m2,fact = 1,1000,1000
     x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
     f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
     return f.corr()[0][1], f1_, thresh
@@ -819,7 +819,7 @@ def evaluate_models():
     train_y_preds, test_y_preds = [], []
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
-    for weight, cfg in all_cfgs:
+    for weight, cfg in all_cfgs.items():
         model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg   
         data = load_data(dtype, input_length, w2v_length)
         train_x, train_y, test_x, test_y = split_data(data)
@@ -847,52 +847,62 @@ def find_out_combine_mean():
         else:
             print(lines[2*i])
 
-def get_error_sample(model_path):
+def get_error_sample():
     train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
-    index = list(all_cfgs).index(model_path)
-    error_id = test_y_preds[index] != test_y
-    data = open(train_file, 'r', encoding="utf8").readlines()
-    train, test = train_test_split(data, test_size=test_size, random_state=random_state)
-    error_sample = [test[i] for i in error_id]
-    os.makedirs(model_dir+"error_sample"+ exist_ok=True)
-    open(model_dir+"error_sample/"+model_path.split("/")[-1].split(".")[0]+".csv",'w',encoding="utf8").writelines(error_sample)
+    for model_path in all_cfgs.keys():
+        index = list(all_cfgs).index(model_path)
+        r,f1,thresh = r_f1_thresh(test_y_preds[index], test_y)
+        error_id = (test_y_preds[index]>thresh) != test_y
+        data = open(train_file, 'r', encoding="utf8").readlines()
+        train, test = train_test_split(data, test_size=test_size, random_state=random_state)
+        error_sample = [test[i] for i in range(len(error_id)) if error_id[i]]
+        print(f"{model_path} error rate: {len(error_sample)}/{len(test_y)}")
+        os.makedirs(model_dir+"error_sample", exist_ok=True)
+        open(model_dir+"error_sample/"+model_path.split("/")[-1].split(".")[0]+".csv",'w',encoding="utf8").writelines(error_sample)
 
 blending_path = model_dir + "blending_gdbm.pkl"
 def train_blending():
-    """ 根据配置文件计算每个模型的关于验证集的值 """
-    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
-    num_clfs = len(all_cfgs)
-    test_y_preds = []
-    for weight, cfg in all_cfgs:
-        K.clear_session()
-        model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
-        data = load_data(dtype, input_length, w2v_length)
-        train_x, train_y, test_x, test_y = split_data(data)
-        model = get_model(cfg, weight)
+    """ 根据配置文件和验证集的值计算融合模型 """
+    train_y_preds,train_y,org_valid_preds,org_valid_y = pd.read_pickle(model_dir + "y_pred.pkl")
+    train_y_preds = train_y_preds.T
+    org_valid_preds = org_valid_preds.T
 
-        test_y_preds.append(model.predict(test_x, batch_size=test_batch_size).reshape(-1))
 
-    test_y_preds = np.array(test_y_preds).T
     '''融合使用的模型'''
-    # clf = LogisticRegression()
-    # clf = LogisticRegressionCV()
-    clf = GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30)
-    clf.fit(test_y_preds, test_y)
-    pandas.to_pickle(clf, blending_path)
+    for clf in [LogisticRegression(),
+                LogisticRegressionCV(),
+                GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30),]:
+        print(clf)
+        for random_state in range(5):
+            valid_y_preds, test_y_preds, valid_y, test_y = train_test_split(org_valid_preds, org_valid_y, test_size=0.55, random_state=random_state)
+            clf.fit(valid_y_preds, valid_y)
+            print("group", random_state)
+            train_y_preds_blend = clf.predict_proba(train_y_preds)[:,1]
+            r,f1,train_thresh = r_f1_thresh(train_y_preds_blend, train_y)
+
+            valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
+            r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
+
+            test_y_preds_blend = clf.predict_proba(test_y_preds)[:,1]
+            v1 = f1_score(test_y_preds_blend>train_thresh, test_y), 
+            v2 = f1_score(test_y_preds_blend>valid_thresh, test_y)
+            print(v1,v2, v1>v2)
+
+            pd.to_pickle((valid_thresh,clf), blending_path)
 
 #####################################################################
 #                         输出结果
 #####################################################################
 
 def result():
-    online = False
+    # online = False
     if not online: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
   
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
     test_y_preds = []
-    for weight, cfg in all_cfgs:
+    for weight, cfg in all_cfgs.items():
         K.clear_session()
         model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
         data = load_data(dtype, input_length, w2v_length)
@@ -901,8 +911,8 @@ def result():
         test_y_preds.append(model.predict(X, batch_size=test_batch_size).reshape(-1))
 
     test_y_preds = np.array(test_y_preds).T
-    cls = pandas.read_pickle(blending_path)
-    result = clf.predict(test_y_preds).reshape(-1)
+    thresh,clf = pd.read_pickle(blending_path)
+    result = clf.predict_proba(test_y_preds).reshape(-1)>thresh
 
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
     if online: topai(1,df_output)
@@ -911,10 +921,14 @@ def result():
         print(sum(result))
 
 
+# for cfg in cfgs:
+#     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
+#     save_config(model_dir + f"{model_type}_{dtype}.h5",cfg)
+
 # train_all_models([0:7])
 # evaluate_models()
 # find_out_combine_mean()
-get_error_sample(model_dir+"siamese_char.h5")
+# get_error_sample()
 train_blending()
 result()
 

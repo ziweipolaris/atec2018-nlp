@@ -4151,7 +4151,10 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
     clas_id = clas_id if clas_id == '' else f'{clas_id}_'
     intermediate_clas_file = f'{PRE}{clas_id}clas_0_{dtype}'
     final_clas_file = f'{PRE}{clas_id}clas_1_{dtype}'
-    lm_file = f'{PRE}{lm_id}lm_{dtype}-swa_enc'     # swa 版本更好
+    if online:
+        lm_file = f'{PRE}{lm_id}lm_{dtype}_enc'     # 
+    else:
+        lm_file = f'{PRE}{lm_id}lm_{dtype}-swa_enc'     # 本地 swa 版本更好
     lm_path = dir_path + "/" + 'models' + "/" + f'{lm_file}.h5'
     assert os.path.exists(lm_path), f'Error: {lm_path} does not exist.'
 
@@ -4348,6 +4351,20 @@ def main(similar_cls):
 
     def step3(dtype, backwards):    # 基于语言模型训练分类器
         '''训练分类器， 精度：  2+6epoch 0.494 42min'''
+
+        '''
+        ESIM(25epoch 10548s)
+        (0.009264956584760111, 0.2990871369294606, 0.0)
+        (-0.0022201639439278402, 0.29918645193425203, 0.19)
+
+        Siamese(25epoch 8866s)
+        (0.46805806932410426, 0.5372168284789643, 0.293)
+        (0.4387573102493323, 0.5076566125290023, 0.432)
+
+        Siamese_Baseline(25epoch 8370s)
+        (0.4641013241384524, 0.5223529411764706, 0.308)
+        (0.3982938312050042, 0.4770240700218818, 0.491)
+        '''
         start = time.time()
         train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=25, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
         print("train clas lm used:%f"%(time.time() - start))
@@ -4398,6 +4415,7 @@ if __name__ == '__main__':
     # 清除不用的GPU缓存，使Keras有显存可用
     torch.cuda.empty_cache()
     
+
 '''
 sortish 两个输入的排序问题
 训练backward语言模型和分类器
