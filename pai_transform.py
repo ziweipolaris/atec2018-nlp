@@ -2072,7 +2072,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
             avg_loss = avg_loss * avg_mom + loss * (1-avg_mom)
             debias_loss = avg_loss / (1 - avg_mom**batch_num)
 
-            # print(f"batch: {index+1} / {num_batch} loss={debias_loss}")
+            print(f"epoch {epoch} batch: {index+1} / {num_batch} loss={debias_loss}")
 
             # if index>3: batch_num = 10e10
             stop=False
@@ -4334,13 +4334,14 @@ def main(similar_cls):
     
     def step1(dtype, backwards):    # 训练一个语言模型
         '''训练语言模型，精度：    4epoch，4*12391次迭代，char_bwd=0.350832'''
-        '''online训练语言模型，精度： 2epoch char_bwd = 0.389244  char_fwd = 0.396402          char = 0.414632 , word = * '''
+        '''online模型，精度： 2epoch char_bwd = 0.389244  char_fwd = 0.396402'''
         start = time.time()
         pretrain_lm(model_dir+"wiki", cuda_id=0,lr=1e-3, cl = 4, preload=False, dtype=dtype, backwards=backwards) # cl=12
         print("pretrain lm used:%f"%(time.time() - start))
 
     def step2(dtype, backwards):    # finetune当前语言模型
-        '''finetune语言模型，精度：   25epoch 25*745次迭代，char_bwd=0.65192   最佳纪录char_fwd = 0.652922'''
+        '''finetune语言模型，精度：   25epoch 25*745次迭代， char_bwd=0.65192    char_fwd=0.652922'''
+        '''online模型，      精度：    5epoch 5*3628次迭代， char_bwd=0.665007   char_fwd=0.675306'''
         start = time.time()
         finetune_lm(model_dir+"atec", model_dir+"wiki", cuda_id=0, cl=17, dtype=dtype, backwards=backwards, preload=True, startat=0) # cl=25
         print("finetune lm used:%f"%(time.time() - start))
@@ -4391,29 +4392,15 @@ def main(similar_cls):
 
 if __name__ == '__main__':  
     # prepare_data()
-    # 
     
-    similar_cls = ESIM
-    main(similar_cls)
-    # 清除不用的GPU缓存，使Keras有显存可用
-    torch.cuda.empty_cache()
-
     similar_cls = Siamese
     main(similar_cls)
     # 清除不用的GPU缓存，使Keras有显存可用
     torch.cuda.empty_cache()
     
-    similar_cls = Siamese_Baseline
-    main(similar_cls)
-    # 清除不用的GPU缓存，使Keras有显存可用
-    torch.cuda.empty_cache()
-
 '''
-构建之前的siamese和esim，输入为400*3维
 sortish 两个输入的排序问题
-训练过程断点继续
 训练backward语言模型和分类器
-看下复赛中增加了哪些细粒度特征
 
 两个rnn编码网络的loss正则项进行平均
 

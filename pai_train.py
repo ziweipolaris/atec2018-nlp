@@ -26,12 +26,14 @@ from keras.preprocessing.sequence import pad_sequences
 from keras.engine.topology import Layer
 from keras import initializers, regularizers, constraints
 
-from sklearn.linear_model import LogisticRegressionCV
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split, KFold
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
 
 from gensim.models.word2vec import LineSentence
 from gensim.models.fasttext import FastText
+import copy
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
@@ -46,8 +48,8 @@ except:
 
 
 w2v_length = 300
-# ebed_type = "gensim"
-ebed_type = "fastcbow"
+ebed_type = "gensim"
+# ebed_type = "fastcbow"
 
 if ebed_type == "gensim":
     char_embedding_model = gensim.models.Word2Vec.load(model_dir + "char2vec_gensim%s"%w2v_length)
@@ -65,12 +67,13 @@ elif ebed_type == "fastskip" or ebed_type == "fastcbow":
 
 print("loaded w2v done!", len(char2index), len(word2index))
 
-fast_mode, fast_rate = True,0.01    # 快速调试，其评分不作为参考
+fast_mode, fast_rate = False,0.01    # 快速调试，其评分不作为参考
 random_state = 42
 MAX_LEN = 30
 MAX_EPOCH = 90
-batch_size = 1000
-earlystop_patience, plateau_patience = 1,2    # patience
+train_batch_size = 64
+test_batch_size = 1000
+earlystop_patience, plateau_patience = 8,2    # patience
 cfgs = [
     ("siamese", "char", 24, ebed_type,  w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
     ("siamese", "word", 20, ebed_type,  w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
@@ -80,8 +83,6 @@ cfgs = [
     ("decom",   "word", 20, ebed_type,  w2v_length,    [],             104-4, earlystop_patience),  # 71s
     ("dssm",    "both", [20,24], ebed_type,  w2v_length, [],           124-8, earlystop_patience), # 55s
 ]
-weights = [model_dir + "%s_%s.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
-final_weights = [model_dir + "%s_%s_all.h5"%(cfg[0],cfg[1]) for cfg in cfgs]
 
 combines, num_models = [],len(cfgs)
 for i in range(1,num_models+1):
@@ -93,7 +94,124 @@ for word in new_words:
 
 star = re.compile("\*+")
 
+#####################################################################
+#                         数据加载预处理阶段
+#####################################################################
 
+train_file = model_dir+"atec_nlp_sim_train.csv"
+def load_data(dtype = "both", input_length=[20,24], w2v_length=300):
+
+    def __load_data(dtype = "word", input_length=20, w2v_length=300):
+
+        filename = model_dir+"%s_%d_%d"%(dtype, input_length, w2v_length)
+        if os.path.exists(filename):
+            return pd.read_pickle(filename)
+
+        data_l_n = []
+        data_r_n = []
+        y = []
+        for line in open(train_file,"r", encoding="utf8"):
+            lineno, s1, s2, label=line.strip().split("\t")
+            if dtype == "word":
+                data_l_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s1))) if word in word2index]) 
+                data_r_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s2))) if word in word2index])
+            if dtype == "char":
+                data_l_n.append([char2index[char] for char in s1 if char in char2index]) 
+                data_r_n.append([char2index[char] for char in s2 if char in char2index])
+
+            y.append(int(label))
+
+        # 对齐语料中句子的长度 
+        data_l_n = pad_sequences(data_l_n, maxlen=input_length)
+        data_r_n = pad_sequences(data_r_n, maxlen=input_length)
+        y = np.array(y)
+
+        pd.to_pickle((data_l_n, data_r_n, y), filename)
+
+        return (data_l_n, data_r_n, y)
+
+    if dtype == "both":
+        ret_array = []
+        for dtype,input_length in zip(['word', 'char'],input_length):
+            data_l_n,data_r_n,y = __load_data(dtype, input_length, w2v_length)
+            ret_array.append(np.asarray(data_l_n))
+            ret_array.append(np.asarray(data_r_n))
+        ret_array.append(y)
+        return ret_array
+    else:
+        return __load_data(dtype, input_length, w2v_length)
+
+def input_data(sent1, sent2, dtype = "both", input_length=[20,24]):
+    def __input_data(sent1, sent2, dtype = "word", input_length=20):
+        data_l_n = []
+        data_r_n = []
+        for s1, s2 in zip(sent1, sent2):
+            if dtype == "word":
+                data_l_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s1))) if word in word2index]) 
+                data_r_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s2))) if word in word2index])
+            if dtype == "char":
+                data_l_n.append([char2index[char] for char in s1 if char in char2index]) 
+                data_r_n.append([char2index[char] for char in s2 if char in char2index])
+
+        # 对齐语料中句子的长度 
+        data_l_n = pad_sequences(data_l_n, maxlen=input_length)
+        data_r_n = pad_sequences(data_r_n, maxlen=input_length)
+
+        return [data_l_n, data_r_n]
+
+    if dtype == "both":
+        ret_array = []
+        for dtype,input_length in zip(['word', 'char'],input_length):
+            data_l_n,data_r_n = __input_data(sent1, sent2, dtype, input_length)
+            ret_array.append(data_l_n)
+            ret_array.append(data_r_n)
+        return ret_array
+    else:
+        return __input_data(sent1, sent2, dtype, input_length)
+
+def split_data(data,mode="train", test_size=test_size, random_state=random_state):
+    # mode == "train":  划分成用于训练的四元组
+    # mode == "orig":   划分成两组数据
+    train = []
+    test = []
+    for data_i in data:
+        if fast_mode:
+            data_i, _ = train_test_split(data_i,test_size=1-fast_rate,random_state=random_state )
+        train_data, test_data = train_test_split(data_i,test_size=test_size,random_state=random_state )
+        train.append(np.asarray(train_data))
+        test.append(np.asarray(test_data))
+
+    if mode == "orig":
+        return train, test
+
+    train_x, train_y, test_x, test_y = train[:-1], train[-1], test[:-1], test[-1]
+    return train_x, train_y, test_x, test_y
+
+def split_data_index(data, train_index, test_index):
+    if len(data) == 3:
+        data_l_n,data_r_n,y = data
+        train_x = [data_l_n[train_index], data_r_n[train_index]]
+        train_y = y[train_index]
+        test_x = [data_l_n[test_index], data_r_n[test_index]]
+        test_y = y[test_index]
+    elif len(data) == 5:
+        train = []
+        test = []
+        for data_i in data:
+            train.append(data_i[train_index])
+            test.append(data_i[test_index])
+        train_x, train_y, test_x, test_y = train[:4], train[4], test[:4], test[4]
+    return train_x, train_y, test_x, test_y
+
+def double_train(train_x, train_y):
+    train_x_mirror = [train_x[i] for i in [1,0,3,2]] if len(train_x)==4 else train_x[::-1]
+    double_x = [np.concatenate((x1,x2)) for x1,x2 in zip(train_x, train_x_mirror)] 
+    double_y = np.concatenate((train_y, train_y))
+    return double_x, double_y
+
+#####################################################################
+#                         模型定义
+#####################################################################
 
 def create_pretrained_embedding(pretrained_weights_path, trainable=False, **kwargs):
     "Create embedding layer from a pretrained weights array"
@@ -465,123 +583,86 @@ def DSSM(pretrained_embedding, input_length, lstmsize=90):
     model = Model(inputs=[input1, input2, input1c, input2c], outputs=res)
     return model
     
-def load_data(dtype = "both", input_length=[20,24], w2v_length=300):
+"""
+    From the paper:
+        Averaging Weights Leads to Wider Optima and Better Generalization
+        Pavel Izmailov, Dmitrii Podoprikhin, Timur Garipov, Dmitry Vetrov, Andrew Gordon Wilson
+        https://arxiv.org/abs/1803.05407
+        2018
+        
+    Author's implementation: https://github.com/timgaripov/swa
+"""
+class SWA(Callback):
+    def __init__(self, model, swa_model, swa_start):
+        super().__init__()
+        self.model,self.swa_model,self.swa_start=model,swa_model,swa_start
+        
+    def on_train_begin(self, logs=None):
+        self.epoch = 0
+        self.swa_n = 0
 
-    def __load_data(dtype = "word", input_length=20, w2v_length=300):
+    def on_epoch_end(self, epoch, logs=None):
+        if (self.epoch + 1) >= self.swa_start:
+            self.update_average_model()
+            self.swa_n += 1
+            
+        self.epoch += 1
+            
+    def update_average_model(self):
+        # update running average of parameters
+        alpha = 1./(self.swa_n + 1)
+        for layer,swa_layer in zip(self.model.layers, self.swa_model.layers):
+            weights = (1-alpha)*swa_layer.get_weights() + alpha*layer.get_weights()
+            swa_layer.set(weights)
 
-        filename = model_dir+"%s_%d_%d"%(dtype, input_length, w2v_length)
-        if os.path.exists(filename):
-            return pd.read_pickle(filename)
+class LR_Updater(Callback):
+    '''
+    Abstract class where all Learning Rate updaters inherit from. (e.g., CirularLR)
+    Calculates and updates new learning rate and momentum at the end of each batch. 
+    Have to be extended. 
+    '''
+    def __init__(self, init_lrs):
+        self.init_lrs = init_lrs
 
-        data_l_n = []
-        data_r_n = []
-        y = []
-        for line in open(model_dir+"atec_nlp_sim_train.csv","r", encoding="utf8"):
-            lineno, s1, s2, label=line.strip().split("\t")
-            if dtype == "word":
-                data_l_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s1))) if word in word2index]) 
-                data_r_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s2))) if word in word2index])
-            if dtype == "char":
-                data_l_n.append([char2index[char] for char in s1 if char in char2index]) 
-                data_r_n.append([char2index[char] for char in s2 if char in char2index])
+    def on_train_begin(self, logs=None):
+        self.update_lr()
 
-            y.append(int(label))
+    def on_batch_end(self, batch, logs=None):
+        self.update_lr()
 
-        # 对齐语料中句子的长度 
-        data_l_n = pad_sequences(data_l_n, maxlen=input_length)
-        data_r_n = pad_sequences(data_r_n, maxlen=input_length)
-        y = np.array(y)
+    def update_lr(self):
+        # cur_lrs = K.get_value(self.model.optimizer.lr)
+        new_lrs = self.calc_lr(self.init_lrs)
+        K.set_value(self.model.optimizer.lr, new_lrs)
 
-        pd.to_pickle((data_l_n, data_r_n, y), filename)
+    def calc_lr(self, init_lrs): raise NotImplementedError
 
-        return (data_l_n, data_r_n, y)
 
-    if dtype == "both":
-        ret_array = []
-        for dtype,input_length in zip(['word', 'char'],input_length):
-            data_l_n,data_r_n,y = __load_data(dtype, input_length, w2v_length)
-            ret_array.append(np.asarray(data_l_n))
-            ret_array.append(np.asarray(data_r_n))
-        ret_array.append(y)
-        return ret_array
-    else:
-        return __load_data(dtype, input_length, w2v_length)
+class CircularLR(LR_Updater):
+    '''
+    A learning rate updater that implements the CircularLearningRate (CLR) scheme. 
+    Learning rate is increased then decreased linearly. 
+    '''
+    def __init__(self, init_lrs, nb, div=4, cut_div=8, on_cycle_end=None):
+        self.nb,self.div,self.cut_div,self.on_cycle_end = nb,div,cut_div,on_cycle_end
+        super().__init__(init_lrs)
 
-def input_data(sent1, sent2, dtype = "both", input_length=[20,24]):
-    def __input_data(sent1, sent2, dtype = "word", input_length=20):
-        data_l_n = []
-        data_r_n = []
-        for s1, s2 in zip(sent1, sent2):
-            if dtype == "word":
-                data_l_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s1))) if word in word2index]) 
-                data_r_n.append([word2index[word] for word in list(jieba.cut(star.sub("1",s2))) if word in word2index])
-            if dtype == "char":
-                data_l_n.append([char2index[char] for char in s1 if char in char2index]) 
-                data_r_n.append([char2index[char] for char in s2 if char in char2index])
+    def on_train_begin(self, logs=None):
+        self.cycle_iter,self.cycle_count=0,0
+        super().on_train_begin()
 
-        # 对齐语料中句子的长度 
-        data_l_n = pad_sequences(data_l_n, maxlen=input_length)
-        data_r_n = pad_sequences(data_r_n, maxlen=input_length)
-
-        return [data_l_n, data_r_n]
-
-    if dtype == "both":
-        ret_array = []
-        for dtype,input_length in zip(['word', 'char'],input_length):
-            data_l_n,data_r_n = __input_data(sent1, sent2, dtype, input_length)
-            ret_array.append(data_l_n)
-            ret_array.append(data_r_n)
-        return ret_array
-    else:
-        return __input_data(sent1, sent2, dtype, input_length)
-
-def split_data(data,mode="train", test_size=test_size, random_state=random_state):
-    # mode == "train":  划分成用于训练的四元组
-    # mode == "orig":   划分成两组数据
-    train = []
-    test = []
-    for data_i in data:
-        if fast_mode:
-            data_i, _ = train_test_split(data_i,test_size=1-fast_rate,random_state=random_state )
-        train_data, test_data = train_test_split(data_i,test_size=test_size,random_state=random_state )
-        train.append(np.asarray(train_data))
-        test.append(np.asarray(test_data))
-
-    if mode == "orig":
-        return train, test
-
-    train_x, train_y, test_x, test_y = train[:-1], train[-1], test[:-1], test[-1]
-    return train_x, train_y, test_x, test_y
-
-def split_data_index(data, train_index, test_index):
-    if len(data) == 3:
-        data_l_n,data_r_n,y = data
-        train_x = [data_l_n[train_index], data_r_n[train_index]]
-        train_y = y[train_index]
-        test_x = [data_l_n[test_index], data_r_n[test_index]]
-        test_y = y[test_index]
-    elif len(data) == 5:
-        train = []
-        test = []
-        for data_i in data:
-            train.append(data_i[train_index])
-            test.append(data_i[test_index])
-        train_x, train_y, test_x, test_y = train[:4], train[4], test[:4], test[4]
-    return train_x, train_y, test_x, test_y
-
-def r_f1_thresh(y_pred,y_true):
-    e = np.zeros((len(y_true),2))
-    e[:,0] = y_pred.reshape(-1)
-    e[:,1] = y_true
-    f = pd.DataFrame(e)
-    m1,m2,fact = 0,1000,1000
-    x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
-    f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
-    return f.corr()[0][1], f1_, thresh
-
-def f1(model,x,y):
-    y_ = model.predict(x,batch_size=batch_size)
-    return r_f1_thresh(y_,y) 
+    def calc_lr(self, init_lrs):
+        cut_pt = self.nb//self.cut_div
+        if self.cycle_iter>cut_pt:
+            pct = 1 - (self.cycle_iter - cut_pt)/(self.nb - cut_pt)
+        else: pct = self.cycle_iter/cut_pt
+        res = init_lrs * (1 + pct*(self.div-1)) / self.div
+        self.cycle_iter += 1
+        if self.cycle_iter==self.nb:
+            self.cycle_iter = 0
+            if self.on_cycle_end: self.on_cycle_end(self, self.cycle_count)
+            self.cycle_count += 1
+        return res
 
 def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
     def __get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
@@ -616,11 +697,6 @@ def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
     else:
         return __get_embedding_layers(dtype, input_length, w2v_length, with_weight)
 
-def double_train(train_x, train_y):
-    train_x_mirror = [train_x[i] for i in [1,0,3,2]] if len(train_x)==4 else train_x[::-1]
-    double_x = [np.concatenate((x1,x2)) for x1,x2 in zip(train_x, train_x_mirror)] 
-    double_y = np.concatenate((train_y, train_y))
-    return double_x, double_y
 
 def get_model(cfg,model_weights=None):
     print("=======   CONFIG: ", cfg)
@@ -651,7 +727,29 @@ def get_model(cfg,model_weights=None):
     # keras.utils.plot_model(model, to_file=model_dir+model_type+"_"+dtype+'.png', show_shapes=True, show_layer_names=True, rankdir='TB')
     return model
 
-def train_model(model, cfg):
+#####################################################################
+#                         评估指标和最佳阈值
+#####################################################################
+
+def r_f1_thresh(y_pred,y_true):
+    e = np.zeros((len(y_true),2))
+    e[:,0] = y_pred.reshape(-1)
+    e[:,1] = y_true
+    f = pd.DataFrame(e)
+    m1,m2,fact = 0,1000,1000
+    x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
+    f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
+    return f.corr()[0][1], f1_, thresh
+
+def f1(model,x,y):
+    y_ = model.predict(x,batch_size=test_batch_size)
+    return r_f1_thresh(y_,y) 
+
+#####################################################################
+#                         模型训练和保存
+#####################################################################
+
+def train_model(model, swa_model, cfg):
     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
 
     data = load_data(dtype, input_length, w2v_length)
@@ -659,55 +757,75 @@ def train_model(model, cfg):
     filepath=model_dir+model_type+"_"+dtype+time.strftime("_%m-%d %H-%M-%S")+".h5"   # 每次运行的模型都进行保存，不覆盖之前的结果
     checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
     earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
-    callbacks = [checkpoint, earlystop]
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
+    swa_cbk = SWA(model, swa_model, swa_start=1)
+
+    init_lrs = 0.001
+    clr_div,cut_div = 10, 8
+    batch_num = (len(train_x)-1) // train_batch_size + 1
+    cycle_len = 1
+    total_iterators = batch_num*cycle_len
+    circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div,)
+    callbacks = [checkpoint, earlystop, swa_cbk, circular_lr]
+
+
     def fit(n_epoch=n_epoch):
         history = model.fit(x=train_x, y=train_y,
             class_weight={0:1/np.mean(train_y),1:1/(1-np.mean(train_y))},
             validation_data=((test_x, test_y)),
-            batch_size=batch_size, 
+            batch_size=train_batch_size, 
             callbacks=callbacks, 
             epochs=n_epoch,verbose=2)
         return history
 
     loss,metrics = 'binary_crossentropy',['binary_crossentropy',"accuracy"]
 
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
-    callbacks.append(reduce_lr)
-    # pre_epoch = int(100*n_epoch)
-    pre_epoch = 1
-    model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
-    if pre_epoch:fit(pre_epoch)
-    # model.compile(optimizer=SGD(lr=5e-2, momentum=0.8, nesterov=False), loss=loss, metrics=metrics)
-    # fit(n_epoch - pre_epoch)
-    configs, jsonfile = {}, model_dir+"all_configs.json"
-    if os.path.exists(jsonfile):
-        configs = json.loads(open(jsonfile,"r",encoding="utf8").read())
-    configs[filepath] = cfg
-    open(jsonfile,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
+    model.compile(optimizer=Adam(lr=init_lrs, beta1=0.8), loss=loss, metrics=metrics)
+    fit()
+
+    filepath_swa = "swa_"+filepath
+    swa_cbk.swa_model.save_weights(filepath_swa)
+
+    # 保存配置，方便多模型集成
+    save_config(filepath, cfg)
+    save_config(filepath_swa, cfg)
 
     if False and not online:
         import matplotlib.pyplot as plt
         plt.plot(history.history["val_loss"])
         plt.show()
 
-def train_all_models():
-    for cfg in cfgs:
+def train_all_models(indexes):
+    for i in indexes:
+        cfg = cfgs[i]
         K.clear_session()
         model = get_model(cfg,None)
-        train_model(model, cfg)
+        swa_model = get_model(cfg,None)
+        train_model(model, swa_model, cfg)
 
-train_all_models()
+
+#####################################################################
+#                         模型评估与融合
+#####################################################################
+
+configs_path = model_dir+"all_configs.json"
+def save_config(filepath, cfg):
+    configs = {}
+    if os.path.exists(configs_path): configs = json.loads(open(configs_path,"r",encoding="utf8").read())
+    configs[filepath] = cfg
+    open(configs_path,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
 
 def evaluate_models():
     train_y_preds, test_y_preds = [], []
-    for cfg,weight in zip(cfgs,weights):
-        K.clear_session()
-        model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg        
+    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
+    num_clfs = len(all_cfgs)
+    for weight, cfg in all_cfgs:
+        model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg   
         data = load_data(dtype, input_length, w2v_length)
         train_x, train_y, test_x, test_y = split_data(data)
         model = get_model(cfg,weight)
-        train_y_preds.append(model.predict(train_x, batch_size=batch_size).reshape(-1))
-        test_y_preds.append(model.predict(test_x, batch_size=batch_size).reshape(-1))
+        train_y_preds.append(model.predict(train_x, batch_size=test_batch_size).reshape(-1))
+        test_y_preds.append(model.predict(test_x, batch_size=test_batch_size).reshape(-1))
 
     train_y_preds,test_y_preds = np.array(train_y_preds),np.array(test_y_preds)
     pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],model_dir + "y_pred.pkl")
@@ -716,7 +834,7 @@ def find_out_combine_mean():
     train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
     with open(model_dir + "combine.txt","w",encoding="utf8") as log:
         for cb in combines:
-            test_y_pred = test_y_preds[cb].mean(axis=0)
+            test_y_pred = test_y_preds[cb].mean(axis=0)     # 选择模型组合的结果进行平均
             test_log = r_f1_thresh(test_y_pred, test_y)
             print(cb)
             print("test  phrase:",test_log)
@@ -729,51 +847,86 @@ def find_out_combine_mean():
         else:
             print(lines[2*i])
 
-# evaluate_models()
-# find_out_combine_mean()
+def get_error_sample(model_path):
+    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(model_dir + "y_pred.pkl")
+    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
+    index = list(all_cfgs).index(model_path)
+    error_id = test_y_preds[index] != test_y
+    data = open(train_file, 'r', encoding="utf8").readlines()
+    train, test = train_test_split(data, test_size=test_size, random_state=random_state)
+    error_sample = [test[i] for i in error_id]
+    os.makedirs(model_dir+"error_sample"+ exist_ok=True)
+    open(model_dir+"error_sample/"+model_path.split("/")[-1].split(".")[0]+".csv",'w',encoding="utf8").writelines(error_sample)
 
-def evaluate_models_from_config():
+blending_path = model_dir + "blending_gdbm.pkl"
+def train_blending():
     """ 根据配置文件计算每个模型的关于验证集的值 """
-    jsonfile = model_dir+"all_configs.json"
-    all_cfgs = json.loads(open(jsonfile,'r',encoding="utf8").read())
+    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
+    num_clfs = len(all_cfgs)
+    test_y_preds = []
     for weight, cfg in all_cfgs:
         K.clear_session()
-        model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg        
+        model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
         data = load_data(dtype, input_length, w2v_length)
         train_x, train_y, test_x, test_y = split_data(data)
         model = get_model(cfg, weight)
 
-def find_out_best_combine():
-    pass
+        test_y_preds.append(model.predict(test_x, batch_size=test_batch_size).reshape(-1))
 
-# evaluate_models_from_config()
-# find_out_best_combine()
+    test_y_preds = np.array(test_y_preds).T
+    '''融合使用的模型'''
+    # clf = LogisticRegression()
+    # clf = LogisticRegressionCV()
+    clf = GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30)
+    clf.fit(test_y_preds, test_y)
+    pandas.to_pickle(clf, blending_path)
+
+#####################################################################
+#                         输出结果
+#####################################################################
 
 def result():
-    if not online: df1 = pd.read_csv(model_dir+"atec_nlp_sim_train.csv",sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
+    online = False
+    if not online: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
   
-    # to evaluate for the result
-    if not online:
-        best_threshold = 0.1400 
-    else:
-        best_threshold = 0.2900
-
-    K.clear_session()
-
-    best_models = [0]
-    # best_models = [0,2,4,5]
-    best_cfgs = [cfgs[i] for i in best_models]
-    best_wgts = [weights[i] for i in best_models]
-
-    train_xs = []
-    for cfg in best_cfgs:
-        model_type,dtype,input_length,w2v_length,n_hidden,n_epoch,patience = cfg
+    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
+    num_clfs = len(all_cfgs)
+    test_y_preds = []
+    for weight, cfg in all_cfgs:
+        K.clear_session()
+        model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
+        data = load_data(dtype, input_length, w2v_length)
         X = input_data(df1["sent1"],df1["sent2"], dtype =dtype, input_length=input_length)
-        train_xs.append(X)
-        
-    enmodel = Ensemble(best_cfgs,best_wgts)
-    result = enmodel.predict(train_xs,batch_size=batch_size) > best_threshold
+        model = get_model(cfg, weight)
+        test_y_preds.append(model.predict(X, batch_size=test_batch_size).reshape(-1))
+
+    test_y_preds = np.array(test_y_preds).T
+    cls = pandas.read_pickle(blending_path)
+    result = clf.predict(test_y_preds).reshape(-1)
+
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
     if online: topai(1,df_output)
-    else: print(df_output)
-# result()
+    else:
+        print(df_output)
+        print(sum(result))
+
+
+# train_all_models([0:7])
+# evaluate_models()
+# find_out_combine_mean()
+get_error_sample(model_dir+"siamese_char.h5")
+train_blending()
+result()
+
+
+'''
+* 对fastai模型进行融合
+
+* 用新技术重新训练模型keras
+* 错误分析
+
+* 用pai平台和传统方法试验
+* 将keras模型和传统方法(特征)进行融合
+
+* 新的自定义神经网络层
+'''
