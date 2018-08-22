@@ -618,7 +618,7 @@ class SWA(Callback):
 
 class LR_Updater(Callback):
     '''
-    Abstract class where all Learning Rate updaters inherit from. (e.g., CirularLR)
+    Abstract class where all Learning Rate updaters inherit from. (e.g., CircularLR)
     Calculates and updates new learning rate and momentum at the end of each batch. 
     Have to be extended. 
     '''
@@ -755,14 +755,14 @@ def get_model(cfg,model_weights=None):
 #                         评估指标和最佳阈值
 #####################################################################
 
-def r_f1_thresh(y_pred,y_true):
+def r_f1_thresh(y_pred,y_true,step=1000):
     e = np.zeros((len(y_true),2))
     e[:,0] = y_pred.reshape(-1)
     e[:,1] = y_true
     f = pd.DataFrame(e)
-    m1,m2,fact = 1,1000,1000
-    x = np.array([f1_score(y_pred=f.loc[:,0]>thr/fact, y_true=f.loc[:,1]) for thr in range(m1,m2)])
-    f1_, thresh = max(x),list(range(m1,m2))[x.argmax()]/fact
+    thrs = np.linspace(0,1,step+1)
+    x = np.array([f1_score(y_pred=f.loc[:,0]>thr, y_true=f.loc[:,1]) for thr in thrs])
+    f1_, thresh = max(x),thrs[x.argmax()]
     return f.corr()[0][1], f1_, thresh
 
 def f1(model,x,y):
@@ -869,8 +869,8 @@ def find_out_combine_mean(use_combine=False):
     num_clfs = len(all_cfgs)
     combine_path = model_dir + "combine"+time.strftime("_%m-%d %H-%M-%S")+".txt"
     with open(combine_path, "w", encoding="utf8") as log:
-        combines, num_clfs = [],len(cfgs)
-        max_clfs = num_clfs if use_combine else 1
+        combines = []
+        max_clfs = min(3,num_clfs) if use_combine else 1
         for i in range(1,max_clfs+1):
             combines.extend([list(c) for c in combinations(range(num_clfs), i)])
 
@@ -880,7 +880,7 @@ def find_out_combine_mean(use_combine=False):
 
         for cb in combines:
             test_y_pred = test_y_preds[cb].mean(axis=0)     # 选择模型组合的结果进行平均
-            test_log = r_f1_thresh(test_y_pred, test_y)
+            test_log = r_f1_thresh(test_y_pred, test_y, step = 10)
             print(cb," \t",test_log)
             log.write("\t".join([str(cb),"\t".join(map(str,test_log))])+"\n")
 
@@ -962,10 +962,10 @@ def result():
 indexes = indexes if online else range(7)
 # train_all_models(indexes)
 # evaluate_models()
-# find_out_combine_mean(False)
+# find_out_combine_mean(True)
 # get_error_sample()
-# train_blending()
-result()
+train_blending()
+# result()
 
 
 '''
