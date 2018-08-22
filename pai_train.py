@@ -75,7 +75,7 @@ random_state = 42
 MAX_LEN = 30
 MAX_EPOCH = 90
 train_batch_size = 64
-test_batch_size = 1000
+test_batch_size = 500
 earlystop_patience, plateau_patience = 8,2    # patience
 cfgs = [
     ("siamese", "char", 24, ebed_type,  w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
@@ -924,9 +924,10 @@ def train_blending():
 #                         输出结果
 #####################################################################
 
+
 def result():
-    if not online: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
-  
+    if online: global df1
+    else: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
     test_y_preds = []
@@ -948,10 +949,10 @@ def result():
     result = clf.predict_proba(test_y_preds)[:,1].reshape(-1)>thresh
 
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
+    
+    print(df_output)
+    print(sum(result))
     if online: topai(1,df_output)
-    else:
-        print(df_output)
-        print(sum(result))
 
 
 # for cfg in cfgs:
@@ -959,12 +960,12 @@ def result():
 #     save_config(model_dir + f"{model_type}_{dtype}.h5",cfg)
 
 indexes = indexes if online else range(7)
-train_all_models(indexes)
+# train_all_models(indexes)
 # evaluate_models()
 # find_out_combine_mean(False)
 # get_error_sample()
 # train_blending()
-# result()
+result()
 
 
 '''

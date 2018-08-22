@@ -2059,6 +2059,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
     phase = 0
     for epoch in range(tot_epochs):
         print(f'Epoch:{epoch+1} / {tot_epochs}')
+        for cb in callbacks: cb.on_epoch_begin()
         if phase >= len(n_epochs): break #Sometimes cumulated errors make this append.
         model_stepper.reset(True)
         cur_data = data[phase]
@@ -2077,7 +2078,7 @@ def fit(model, data, n_epochs, opt, crit, metrics=None, callbacks=None, stepper=
 
             print(f"epoch {epoch} batch: {index+1} / {num_batch} loss={debias_loss}")
 
-            # if index>3: batch_num = 10e10
+            # if index>3: break
             stop=False
             los = debias_loss if not all_val else [debias_loss] + validate_next(model_stepper,metrics, val_iter)
             for cb in callbacks: stop = stop or cb.on_batch_end(los)
@@ -3691,6 +3692,7 @@ class TimerStop(Callback):
         self.start_time = start_time
         self.total_seconds = total_seconds
         self.epoch_seconds = []
+        self.is_stoped = False
 
     def on_epoch_begin(self):
         self.epoch_start = time.time()
@@ -3700,10 +3702,12 @@ class TimerStop(Callback):
 
         mean_epoch_seconds = sum(self.epoch_seconds)/len(self.epoch_seconds)
         if time.time() + mean_epoch_seconds > self.start_time + self.total_seconds:
-            self.model.stop_training = True
+            self.is_stoped = True
+            return True
 
     def on_train_end(self):
-        print('timer stopping')
+        if self.is_stoped:
+            print('timer stopping')
 
 def pretrain_lm(dir_path, cuda_id, cl=1, bs=64, backwards=False, lr=3e-4, sampled=True, early_stopping=True,
              preload = False, pretrain_id='',dtype="char"):
@@ -3950,18 +3954,13 @@ class Siamese(nn.Module):
         return f(x.permute(1,2,0), (1,)).view(bs,-1)
 
     def forward_once(self, x):
-        with set_grad_enabled(self.training):
-            x.requires_grad_()
-            x,_ = self.lstm(x)
-        return x
-
-    def forward_once2(self,x):
+        x.requires_grad_()
+        x,_ = self.lstm(x)
         sl,bs,_ = x.size()
         avgpool = self.pool(x, bs, False)
         mxpool = self.pool(x, bs, True)
         x = torch.cat([x[-1], mxpool, avgpool], 1)
         return x
-
 
     def forward(self, input):
         l_output, r_output = input
@@ -3974,31 +3973,6 @@ class Siamese(nn.Module):
 
             left_output = self.forward_once(encoded_left)
             right_output = self.forward_once(encoded_right)
-
-            # Attention
-            # left_output, right_output = soft_attention_alignment(left_output, right_output)
-            
-            ctx1,ctx2 = left_output, right_output
-            # weight_matrix: #sample x #step1 x #step2
-            weight_matrix = torch.matmul(ctx1.permute(1, 0, 2), ctx2.permute(1, 2, 0))
-            weight_matrix_1 = torch.exp(weight_matrix - weight_matrix.max(1, keepdim=True)[0]).permute(1, 2, 0)
-            weight_matrix_2 = torch.exp(weight_matrix - weight_matrix.max(2, keepdim=True)[0]).permute(1, 2, 0)
-
-            # weight_matrix_1: #step1 x #step2 x #sample
-            # weight_matrix_1 = weight_matrix_1 * x1_mask[:, None, :]
-            # weight_matrix_2 = weight_matrix_2 * x2_mask[None, :, :]
-
-            alpha = weight_matrix_1 / weight_matrix_1.sum(0, keepdim=True)
-            beta = weight_matrix_2 / weight_matrix_2.sum(1, keepdim=True)
-
-            ctx2_ = (torch.unsqueeze(ctx1,1) * torch.unsqueeze(alpha,3)).sum(0)
-            ctx1_ = (torch.unsqueeze(ctx2, 0) * torch.unsqueeze(beta,3)).sum(1)
-
-            inp1 = torch.cat([ctx1, ctx1_, ctx1 * ctx1_, ctx1 - ctx1_], 2)
-            inp2 = torch.cat([ctx2, ctx2_, ctx2 * ctx2_, ctx2 - ctx2_], 2)
-            left_output, right_output = inp1, inp2
-
-            left_output, right_output = self.forward_once2(left_output), self.forward_once2(right_output)
             
             # 距离函数 exponent_neg_manhattan_distance
             malstm_distance = torch.exp(-torch.sum(torch.abs(left_output - right_output), dim=1, keepdim=True))
