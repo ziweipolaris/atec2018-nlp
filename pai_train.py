@@ -907,6 +907,56 @@ def get_error_sample():
         open(model_dir+"error_sample/"+model_path.split("/")[-1].split(".")[0]+".csv",'w',encoding="utf8").writelines(error_sample)
 
 blending_path = model_dir + "blending_gdbm.pkl"
+def tryout_blending():
+    """ 根据配置文件和验证集的值计算融合模型 """
+    train_y_preds,train_y,org_valid_preds,org_valid_y = pd.read_pickle(model_dir + "y_pred.pkl")
+    # 选择验证集上top10的模型
+    topK = 10
+    perform_on_valid = np.array([r_f1_thresh(y_pred, org_valid_y) for y_pred in org_valid_preds],
+        dtype=[("r",np.float),("f1",np.float),("thresh",np.float)])
+    topK_idx = np.argsort(perform_on_valid, axis=0, order="r")[-topK:]
+
+    train_y_preds = train_y_preds[topK_idx].T
+    org_valid_preds = org_valid_preds[topK_idx].T
+
+    clf_list = [LogisticRegression(),
+                LogisticRegressionCV(),
+                GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30),]
+
+    '''融合使用的模型'''
+    groups = 20
+    test_size = 0.5
+    test_values = {}
+    for clf in clf_list:
+        print(clf)
+        test_values[clf] = [[] for _ in range(groups)]
+        for group in range(groups):
+            valid_y_preds, test_y_preds, valid_y, test_y = train_test_split(org_valid_preds, org_valid_y, test_size=test_size, random_state=group)
+            clf.fit(valid_y_preds, valid_y)
+            print("group", group)
+            train_y_preds_blend = clf.predict_proba(train_y_preds)[:,1]
+            r,f1,train_thresh = r_f1_thresh(train_y_preds_blend, train_y)
+            print("train", r,f1,train_thresh)
+
+            valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
+            r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
+            print("valid", r,f1,valid_thresh)
+
+            vs = []
+            test_y_preds_blend = clf.predict_proba(test_y_preds)[:,1]
+            vs.extend( [f1_score(test_y_preds_blend>train_thresh, test_y),
+                f1_score(test_y_preds_blend>valid_thresh, test_y),
+                f1_score(test_y_preds_blend>(train_thresh+valid_thresh)/2, test_y)])
+
+            test_y_preds_blend = (test_y_preds_blend - test_y_preds_blend.min()) / (test_y_preds_blend.max() - test_y_preds_blend.min())
+            vs.extend( [f1_score(test_y_preds_blend>train_thresh, test_y),
+                f1_score(test_y_preds_blend>valid_thresh, test_y),
+                f1_score(test_y_preds_blend>(train_thresh+valid_thresh)/2, test_y)])
+            print("test", vs)
+            test_values[clf][group].append(vs)
+        test_values[clf] = np.array(test_values[clf])
+        print("mean test performance: ", test_values[clf].mean(axis=0))
+
 def train_blending():
     """ 根据配置文件和验证集的值计算融合模型 """
     train_y_preds,train_y,valid_y_preds,valid_y = pd.read_pickle(evaluate_path)
@@ -914,11 +964,15 @@ def train_blending():
     valid_y_preds = valid_y_preds.T
 
     '''融合使用的模型'''
-    clf = LogisticRegressionCV()
+    clf = LogisticRegression()
     clf.fit(valid_y_preds, valid_y)
+
+    train_y_preds_blend = clf.predict_proba(train_y_preds)[:,1]
+    r,f1,train_thresh = r_f1_thresh(train_y_preds_blend, train_y)
+
     valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
     r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
-    pd.to_pickle((valid_thresh,clf), blending_path)
+    pd.to_pickle(((train_thresh+valid_thresh)/2,clf), blending_path)
 
 #####################################################################
 #                         输出结果
@@ -964,7 +1018,8 @@ indexes = indexes if online else range(7)
 # evaluate_models()
 # find_out_combine_mean(True)
 # get_error_sample()
-train_blending()
+tryout_blending()
+# train_blending()
 # result()
 
 
