@@ -1,4 +1,7 @@
 # https://pai4contest.cloud.alipay.com/experiment.htm?Lang=zh_CN&lang=zh_CN&etag=iZbp10tfg72g1zj2tnd6rwZ&experimentId=3508
+
+import time
+start_time = time.time()
 import gensim
 import numpy as np
 import pandas as pd
@@ -165,7 +168,6 @@ def transform_wiki():
 
 
 # start imports###################################################################
-import time
 from enum import IntEnum
 from timeit import default_timer as timer
 import copy
@@ -1160,6 +1162,7 @@ class Callback:
     Must be extended before usage.
     '''
     def on_train_begin(self): pass
+    def on_epoch_begin(self): pass
     def on_batch_begin(self): pass
     def on_phase_begin(self): pass
     def on_epoch_end(self, metrics): pass
@@ -3681,6 +3684,27 @@ class EarlyStopping(Callback):
         self.learner.load(self.save_path)
 
 
+class TimerStop(Callback):
+    """docstring for TimerStop"""
+    def __init__(self, start_time, total_seconds):
+        super(TimerStop, self).__init__()
+        self.start_time = start_time
+        self.total_seconds = total_seconds
+        self.epoch_seconds = []
+
+    def on_epoch_begin(self):
+        self.epoch_start = time.time()
+
+    def on_epoch_end(self, metrics):
+        self.epoch_seconds.append(time.time() - self.epoch_start)
+
+        mean_epoch_seconds = sum(self.epoch_seconds)/len(self.epoch_seconds)
+        if time.time() + mean_epoch_seconds > self.start_time + self.total_seconds:
+            self.model.stop_training = True
+
+    def on_train_end(self):
+        print('timer stopping')
+
 def pretrain_lm(dir_path, cuda_id, cl=1, bs=64, backwards=False, lr=3e-4, sampled=True, early_stopping=True,
              preload = False, pretrain_id='',dtype="char"):
     print(f'=== pretrain_lm: dir_path {dir_path}; cuda_id {cuda_id}; cl {cl}; bs {bs}; '
@@ -4295,6 +4319,7 @@ def train_clas(dir_path, similar, cuda_id, lm_id='', clas_id=None, bs=64, cl=1, 
     if False and early_stopping:
         callbacks.append(EarlyStopping(learn, final_clas_file, patience=5))
         print('Using early stopping...')
+    if online:callbacks.append(TimerStop(start_time=start_time, total_seconds=7100))
     learn.fit(lrs, n_cycles, wds=wd, cycle_len=cl, use_clr=(8,8) if use_clr else None, callbacks=callbacks)
 
     print('Plotting lrs...')

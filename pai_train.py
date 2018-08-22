@@ -781,7 +781,6 @@ def train_model(model, swa_model, cfg):
     filepath=model_dir+model_type+"_"+dtype+time.strftime("_%m-%d %H-%M-%S")+".h5"   # 每次运行的模型都进行保存，不覆盖之前的结果
     checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
     earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
-    timerstop = TimerStop(start_time=start_time, total_seconds=7100)
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
     swa_cbk = SWA(model, swa_model, swa_start=1)
 
@@ -792,8 +791,8 @@ def train_model(model, swa_model, cfg):
     total_iterators = batch_num*cycle_len
     print("total iters per cycle(epoch):",total_iterators)
     circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div)
-    callbacks = [checkpoint, earlystop, swa_cbk, circular_lr,timerstop]
-
+    callbacks = [checkpoint, earlystop, swa_cbk, circular_lr]
+    if online:callbacks.append(TimerStop(start_time=start_time, total_seconds=7100))
 
     def fit(n_epoch=n_epoch):
         history = model.fit(x=train_x, y=train_y,
