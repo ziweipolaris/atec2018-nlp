@@ -1,10 +1,13 @@
 #/usr/bin/env python
 #coding=utf-8
 
+indexes = []
+
+import time
+start_time = time.time()
 import multiprocessing
 import os
 import re
-import time
 import json
 import gensim
 try:
@@ -662,6 +665,29 @@ class CircularLR(LR_Updater):
             self.cycle_count += 1
         return res
 
+class TimerStop(Callback):
+    """docstring for TimerStop"""
+    def __init__(self, start_time, total_seconds):
+        super(TimerStop, self).__init__()
+        self.start_time = start_time
+        self.total_seconds = total_seconds
+        self.epoch_seconds = []
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start = time.time()
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.epoch_seconds.append(time.time() - self.epoch_start)
+
+        mean_epoch_seconds = sum(self.epoch_seconds)/len(self.epoch_seconds)
+        if time.time() + mean_epoch_seconds > self.start_time + self.total_seconds:
+            self.model.stop_training = True
+
+    def on_train_end(self, logs=None):
+        print('timer stopping')
+
+
+
 def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
     def __get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
 
@@ -755,6 +781,7 @@ def train_model(model, swa_model, cfg):
     filepath=model_dir+model_type+"_"+dtype+time.strftime("_%m-%d %H-%M-%S")+".h5"   # 每次运行的模型都进行保存，不覆盖之前的结果
     checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=True,save_weights_only=True, mode='auto')
     earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=patience, verbose=0, mode='auto')
+    timerstop = TimerStop(start_time=start_time, total_seconds=7100)
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', verbose=0, factor=0.5,patience=2, min_lr=1e-6)
     swa_cbk = SWA(model, swa_model, swa_start=1)
 
@@ -763,9 +790,9 @@ def train_model(model, swa_model, cfg):
     batch_num = (train_x[0].shape[0]-1) // train_batch_size + 1
     cycle_len = 1
     total_iterators = batch_num*cycle_len
-    print(total_iterators)
+    print("total iters per cycle(epoch):",total_iterators)
     circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div)
-    callbacks = [checkpoint, earlystop, swa_cbk, circular_lr]
+    callbacks = [checkpoint, earlystop, swa_cbk, circular_lr,timerstop]
 
 
     def fit(n_epoch=n_epoch):
@@ -788,6 +815,12 @@ def train_model(model, swa_model, cfg):
     # 保存配置，方便多模型集成
     save_config(filepath, cfg)
     save_config(filepath_swa, cfg)
+
+    model.load_weights(filepath)
+    y_pred = model.predict(test_x)
+    print("best model:", r_f1_thresh(y_pred, test_y))
+    y_pred = swa_model.predict(test_x)
+    print("swa  model:", r_f1_thresh(y_pred, test_y))
 
     if False and not online:
         import matplotlib.pyplot as plt
@@ -926,12 +959,13 @@ def result():
 #     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
 #     save_config(model_dir + f"{model_type}_{dtype}.h5",cfg)
 
-# train_all_models(range(7))
-evaluate_models()
+indexes = indexes if online else range(7)
+train_all_models(indexes)
+# evaluate_models()
 # find_out_combine_mean(False)
 # get_error_sample()
-train_blending()
-result()
+# train_blending()
+# result()
 
 
 '''

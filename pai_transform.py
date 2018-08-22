@@ -3897,13 +3897,6 @@ class Siamese_Baseline(nn.Module):
         with set_grad_enabled(self.training):
             l_raw_outputs, l_outputs = l_output
             r_raw_outputs, r_outputs = r_output
-            # print("================")
-            # print(len(l_raw_outputs), len(r_raw_outputs), len(l_outputs), len(r_outputs))
-            # print(l_raw_outputs[0].size(), r_raw_outputs[0].size(), l_outputs[0].size(), r_outputs[0].size())
-            # print(l_raw_outputs[0])
-            # print(r_raw_outputs[0])
-            # print(l_outputs[0])
-            # print(r_outputs[0])
 
             encoded_left = l_outputs[-1]
             encoded_right = r_outputs[-1]
@@ -3936,11 +3929,15 @@ class Siamese(nn.Module):
         with set_grad_enabled(self.training):
             x.requires_grad_()
             x,_ = self.lstm(x)
-            sl,bs,_ = x.size()
-            avgpool = self.pool(x, bs, False)
-            mxpool = self.pool(x, bs, True)
-            x = torch.cat([x[-1], mxpool, avgpool], 1)
         return x
+
+    def forward_once2(self,x):
+        sl,bs,_ = x.size()
+        avgpool = self.pool(x, bs, False)
+        mxpool = self.pool(x, bs, True)
+        x = torch.cat([x[-1], mxpool, avgpool], 1)
+        return x
+
 
     def forward(self, input):
         l_output, r_output = input
@@ -3954,11 +3951,35 @@ class Siamese(nn.Module):
             left_output = self.forward_once(encoded_left)
             right_output = self.forward_once(encoded_right)
 
+            # Attention
+            # left_output, right_output = soft_attention_alignment(left_output, right_output)
+            
+            ctx1,ctx2 = left_output, right_output
+            # weight_matrix: #sample x #step1 x #step2
+            weight_matrix = torch.matmul(ctx1.permute(1, 0, 2), ctx2.permute(1, 2, 0))
+            weight_matrix_1 = torch.exp(weight_matrix - weight_matrix.max(1, keepdim=True)[0]).permute(1, 2, 0)
+            weight_matrix_2 = torch.exp(weight_matrix - weight_matrix.max(2, keepdim=True)[0]).permute(1, 2, 0)
+
+            # weight_matrix_1: #step1 x #step2 x #sample
+            # weight_matrix_1 = weight_matrix_1 * x1_mask[:, None, :]
+            # weight_matrix_2 = weight_matrix_2 * x2_mask[None, :, :]
+
+            alpha = weight_matrix_1 / weight_matrix_1.sum(0, keepdim=True)
+            beta = weight_matrix_2 / weight_matrix_2.sum(1, keepdim=True)
+
+            ctx2_ = (torch.unsqueeze(ctx1,1) * torch.unsqueeze(alpha,3)).sum(0)
+            ctx1_ = (torch.unsqueeze(ctx2, 0) * torch.unsqueeze(beta,3)).sum(1)
+
+            inp1 = torch.cat([ctx1, ctx1_, ctx1 * ctx1_, ctx1 - ctx1_], 2)
+            inp2 = torch.cat([ctx2, ctx2_, ctx2 * ctx2_, ctx2 - ctx2_], 2)
+            left_output, right_output = inp1, inp2
+
+            left_output, right_output = self.forward_once2(left_output), self.forward_once2(right_output)
+            
             # 距离函数 exponent_neg_manhattan_distance
             malstm_distance = torch.exp(-torch.sum(torch.abs(left_output - right_output), dim=1, keepdim=True))
         
         return malstm_distance.view(-1), l_raw_outputs, l_outputs
-
 
 def soft_attention_alignment(a, b):
     "Align text representation with neural soft attention"
@@ -4364,9 +4385,11 @@ def main(similar_cls):
         Siamese_Baseline(25epoch 8370s)
         (0.4641013241384524, 0.5223529411764706, 0.308)
         (0.3982938312050042, 0.4770240700218818, 0.491)
+
+        Siamese_change(10epoch )
         '''
         start = time.time()
-        train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=25, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
+        train_clas(model_dir+"atec", similar_cls, cuda_id=0, cl=10, dtype=dtype, backwards=backwards, startat=0, load_learn=False) #cl=50
         print("train clas lm used:%f"%(time.time() - start))
 
     def find_best_thr(dtype, backwards):
