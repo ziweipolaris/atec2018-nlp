@@ -4421,11 +4421,11 @@ def main(similar_cls):
     # dtype, backwards = "word",True
     # dtype, backwards = "word",False
     
-    # step1(dtype,backwards)
-    # step2(dtype,backwards)
+    step1(dtype,backwards)
+    step2(dtype,backwards)
     step3(dtype,backwards)
     find_best_thr(dtype,backwards)
-    # get_result(dtype,backwards)
+    get_result(dtype,backwards)
 
 
 
@@ -4436,19 +4436,3 @@ if __name__ == '__main__':
     main(similar_cls)
     # 清除不用的GPU缓存，使Keras有显存可用
     torch.cuda.empty_cache()
-    
-
-'''
-sortish 两个输入的排序问题
-训练backward语言模型和分类器
-
-两个rnn编码网络的loss正则项进行平均
-
-
-5种不同的模型：
-InferSent(句子编码模型)
-Shortcut-Stacked Sentence Encoder Model(SSEM)(句子编码模型)
-Pairwise Word Interaction Model(PWIM)(句对交互模型)
-Decomposable Attention Model(DecAtt)(句对交互模型)
-Enhanced Sequential Inference Model(ESIM)(句对交互模型)
-'''

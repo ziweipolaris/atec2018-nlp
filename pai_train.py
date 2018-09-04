@@ -10,10 +10,7 @@ import os
 import re
 import json
 import gensim
-try:
-    import jieba_fast as jieba
-except Exception as e:
-    import jieba
+import jieba
 import keras
 import keras.backend as K
 import numpy as np
@@ -40,63 +37,18 @@ import copy
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
 
-try:
-    print(model_dir)
-    test_size = 0.025
-    online=True
-except:
-    model_dir = "pai_model/"
-    test_size = 0.05
-    online=False
-
-w2v_length = 300 if online else 256
-
-ebed_type = "gensim"
-# ebed_type = "fastcbow"
-
-if ebed_type == "gensim":
-    char_embedding_model = gensim.models.Word2Vec.load(model_dir + "char2vec_gensim%s"%w2v_length)
-    char2index = {v:k for k,v in enumerate(char_embedding_model.wv.index2word)}
-    word_embedding_model = gensim.models.Word2Vec.load(model_dir + "word2vec_gensim%s"%w2v_length)
-    word2index = {v:k for k,v in enumerate(word_embedding_model.wv.index2word)}
-
-elif ebed_type == "fastskip" or ebed_type == "fastcbow":
-    char_fastcbow = FastText.load(model_dir + "char2vec_%s%d"%(ebed_type, w2v_length))
-    char_embedding_matrix = char_fastcbow.wv.vectors
-    char2index = {v:k for k,v in enumerate(char_fastcbow.wv.index2word)}
-    word_fastcbow = FastText.load(model_dir + "word2vec_%s%d"%(ebed_type, w2v_length))
-    word_embedding_matrix = word_fastcbow.wv.vectors
-    word2index = {v:k for k,v in enumerate(word_fastcbow.wv.index2word)}
-
-print("loaded w2v done!", len(char2index), len(word2index))
-
-fast_mode, fast_rate = False,0.01    # 快速调试，其评分不作为参考
-random_state = 42
-MAX_LEN = 30
-MAX_EPOCH = 90
-train_batch_size = 64
-test_batch_size = 500
-earlystop_patience, plateau_patience = 8,2    # patience
-cfgs = [
-    ("siamese", "char", 24, ebed_type,  w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
-    ("siamese", "word", 20, ebed_type,  w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
-    ("esim",    "char", 24, ebed_type,  w2v_length,    [],             18,  earlystop_patience),  # 389s
-    ("esim",    "word", 20, ebed_type,  w2v_length,    [],             21,  earlystop_patience),  # 335s   
-    ("decom",   "char", 24, ebed_type,  w2v_length,    [],             87-2,  earlystop_patience),   # 84s
-    ("decom",   "word", 20, ebed_type,  w2v_length,    [],             104-4, earlystop_patience),  # 71s
-    ("dssm",    "both", [20,24], ebed_type,  w2v_length, [],           124-8, earlystop_patience), # 55s
-]
-
+#####################################################################
+#                         数据加载预处理阶段
+#####################################################################
 new_words = "支付宝 付款码 二维码 收钱码 转账 退款 退钱 余额宝 运费险 还钱 还款 花呗 借呗 蚂蚁花呗 蚂蚁借呗 蚂蚁森林 小黄车 飞猪 微客 宝卡 芝麻信用 亲密付 淘票票 饿了么 摩拜 滴滴 滴滴出行".split(" ")
 for word in new_words:
     jieba.add_word(word)
 
 star = re.compile("\*+")
 
-#####################################################################
-#                         数据加载预处理阶段
-#####################################################################
-
+test_size = 0.025
+random_state = 42
+fast_mode, fast_rate = False,0.01    # 快速调试，其评分不作为参考
 train_file = model_dir+"atec_nlp_sim_train.csv"
 def load_data(dtype = "both", input_length=[20,24], w2v_length=300):
 
@@ -168,6 +120,10 @@ def input_data(sent1, sent2, dtype = "both", input_length=[20,24]):
     else:
         return __input_data(sent1, sent2, dtype, input_length)
 
+
+###########################################################################
+#                            训练验证集划分
+###########################################################################
 def split_data(data,mode="train", test_size=test_size, random_state=random_state):
     # mode == "train":  划分成用于训练的四元组
     # mode == "orig":   划分成两组数据
@@ -186,31 +142,79 @@ def split_data(data,mode="train", test_size=test_size, random_state=random_state
     train_x, train_y, test_x, test_y = train[:-1], train[-1], test[:-1], test[-1]
     return train_x, train_y, test_x, test_y
 
-def split_data_index(data, train_index, test_index):
-    if len(data) == 3:
-        data_l_n,data_r_n,y = data
-        train_x = [data_l_n[train_index], data_r_n[train_index]]
-        train_y = y[train_index]
-        test_x = [data_l_n[test_index], data_r_n[test_index]]
-        test_y = y[test_index]
-    elif len(data) == 5:
-        train = []
-        test = []
-        for data_i in data:
-            train.append(data_i[train_index])
-            test.append(data_i[test_index])
-        train_x, train_y, test_x, test_y = train[:4], train[4], test[:4], test[4]
-    return train_x, train_y, test_x, test_y
-
-def double_train(train_x, train_y):
-    train_x_mirror = [train_x[i] for i in [1,0,3,2]] if len(train_x)==4 else train_x[::-1]
-    double_x = [np.concatenate((x1,x2)) for x1,x2 in zip(train_x, train_x_mirror)] 
-    double_y = np.concatenate((train_y, train_y))
-    return double_x, double_y
 
 #####################################################################
 #                         模型定义
 #####################################################################
+
+w2v_length = 300
+ebed_type = "gensim"
+# ebed_type = "fastcbow"
+
+if ebed_type == "gensim":
+    char_embedding_model = gensim.models.Word2Vec.load(model_dir + "char2vec_gensim%s"%w2v_length)
+    char2index = {v:k for k,v in enumerate(char_embedding_model.wv.index2word)}
+    word_embedding_model = gensim.models.Word2Vec.load(model_dir + "word2vec_gensim%s"%w2v_length)
+    word2index = {v:k for k,v in enumerate(word_embedding_model.wv.index2word)}
+
+elif ebed_type == "fastskip" or ebed_type == "fastcbow":
+    char_fastcbow = FastText.load(model_dir + "char2vec_%s%d"%(ebed_type, w2v_length))
+    char_embedding_matrix = char_fastcbow.wv.vectors
+    char2index = {v:k for k,v in enumerate(char_fastcbow.wv.index2word)}
+    word_fastcbow = FastText.load(model_dir + "word2vec_%s%d"%(ebed_type, w2v_length))
+    word_embedding_matrix = word_fastcbow.wv.vectors
+    word2index = {v:k for k,v in enumerate(word_fastcbow.wv.index2word)}
+
+print("loaded w2v done!", len(char2index), len(word2index))
+
+MAX_LEN = 30
+MAX_EPOCH = 90
+train_batch_size = 64
+test_batch_size = 500
+earlystop_patience, plateau_patience = 8,2    # patience
+cfgs = [
+    ("siamese", "char", 24, ebed_type,  w2v_length,    [100, 80, 64, 64],   102-5, earlystop_patience),  # 69s
+    ("siamese", "word", 20, ebed_type,  w2v_length,    [100, 80, 64, 64],   120-4, earlystop_patience),  # 59s
+    ("esim",    "char", 24, ebed_type,  w2v_length,    [],             18,  earlystop_patience),  # 389s
+    ("esim",    "word", 20, ebed_type,  w2v_length,    [],             21,  earlystop_patience),  # 335s   
+    ("decom",   "char", 24, ebed_type,  w2v_length,    [],             87-2,  earlystop_patience),   # 84s
+    ("decom",   "word", 20, ebed_type,  w2v_length,    [],             104-4, earlystop_patience),  # 71s
+    ("dssm",    "both", [20,24], ebed_type,  w2v_length, [],           124-8, earlystop_patience), # 55s
+]
+
+
+def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
+    def __get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
+
+        if dtype == 'word':
+            embedding_length = len(word2index)
+        elif dtype == 'char':
+            embedding_length = len(char2index)
+
+        if with_weight:
+            if ebed_type == "gensim":
+                if dtype == 'word':
+                    embedding = word_embedding_model.wv.get_keras_embedding(train_embeddings=True)
+                else:
+                    embedding = char_embedding_model.wv.get_keras_embedding(train_embeddings=True)
+
+            elif ebed_type == "fastskip" or ebed_type == "fastcbow":
+                if dtype == 'word':
+                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[word_embedding_matrix], trainable=True)
+                else:
+                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[char_embedding_matrix], trainable=True)
+        else:
+            embedding = Embedding(embedding_length, w2v_length, input_length=input_length, trainable=True)
+
+        return embedding
+
+    if dtype == "both":
+        embedding = []
+        for dtype,input_length in zip(['word', 'char'],input_length):
+            embedding.append(__get_embedding_layers(dtype, input_length, w2v_length, with_weight))
+        return embedding
+    else:
+        return __get_embedding_layers(dtype, input_length, w2v_length, with_weight)
 
 def create_pretrained_embedding(pretrained_weights_path, trainable=False, **kwargs):
     "Create embedding layer from a pretrained weights array"
@@ -687,41 +691,6 @@ class TimerStop(Callback):
         print('timer stopping')
 
 
-
-def get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
-    def __get_embedding_layers(dtype, input_length, w2v_length, with_weight=True):
-
-        if dtype == 'word':
-            embedding_length = len(word2index)
-        elif dtype == 'char':
-            embedding_length = len(char2index)
-
-        if with_weight:
-            if ebed_type == "gensim":
-                if dtype == 'word':
-                    embedding = word_embedding_model.wv.get_keras_embedding(train_embeddings=True)
-                else:
-                    embedding = char_embedding_model.wv.get_keras_embedding(train_embeddings=True)
-
-            elif ebed_type == "fastskip" or ebed_type == "fastcbow":
-                if dtype == 'word':
-                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[word_embedding_matrix], trainable=True)
-                else:
-                    embedding = Embedding(embedding_length, w2v_length, input_length=input_length, weights=[char_embedding_matrix], trainable=True)
-        else:
-            embedding = Embedding(embedding_length, w2v_length, input_length=input_length, trainable=True)
-
-        return embedding
-
-    if dtype == "both":
-        embedding = []
-        for dtype,input_length in zip(['word', 'char'],input_length):
-            embedding.append(__get_embedding_layers(dtype, input_length, w2v_length, with_weight))
-        return embedding
-    else:
-        return __get_embedding_layers(dtype, input_length, w2v_length, with_weight)
-
-
 def get_model(cfg,model_weights=None):
     print("=======   CONFIG: ", cfg)
 
@@ -765,13 +734,15 @@ def r_f1_thresh(y_pred,y_true,step=1000):
     f1_, thresh = max(x),thrs[x.argmax()]
     return f.corr()[0][1], f1_, thresh
 
-def f1(model,x,y):
-    y_ = model.predict(x,batch_size=test_batch_size)
-    return r_f1_thresh(y_,y) 
-
 #####################################################################
 #                         模型训练和保存
 #####################################################################
+configs_path = model_dir+"all_configs.json"
+def save_config(filepath, cfg):
+    configs = {}
+    if os.path.exists(configs_path): configs = json.loads(open(configs_path,"r",encoding="utf8").read())
+    configs[filepath] = cfg
+    open(configs_path,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
 
 def train_model(model, swa_model, cfg):
     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
@@ -792,7 +763,7 @@ def train_model(model, swa_model, cfg):
     print("total iters per cycle(epoch):",total_iterators)
     circular_lr = CircularLR(init_lrs, total_iterators, on_cycle_end=None, div=clr_div, cut_div=cut_div)
     callbacks = [checkpoint, earlystop, swa_cbk, circular_lr]
-    if online:callbacks.append(TimerStop(start_time=start_time, total_seconds=7100))
+    callbacks.append(TimerStop(start_time=start_time, total_seconds=7100))
 
     def fit(n_epoch=n_epoch):
         history = model.fit(x=train_x, y=train_y,
@@ -815,36 +786,17 @@ def train_model(model, swa_model, cfg):
     save_config(filepath, cfg)
     save_config(filepath_swa, cfg)
 
-    model.load_weights(filepath)
-    y_pred = model.predict(test_x)
-    print("best model:", r_f1_thresh(y_pred, test_y))
-    y_pred = swa_model.predict(test_x)
-    print("swa  model:", r_f1_thresh(y_pred, test_y))
-
-    if False and not online:
-        import matplotlib.pyplot as plt
-        plt.plot(history.history["val_loss"])
-        plt.show()
-
-def train_all_models(indexes):
-    for i in indexes:
-        cfg = cfgs[i]
-        K.clear_session()
-        model = get_model(cfg,None)
-        swa_model = get_model(cfg,None)
-        train_model(model, swa_model, cfg)
+def train_all_models(index):
+    cfg = cfgs[index]
+    K.clear_session()
+    model = get_model(cfg,None)
+    swa_model = get_model(cfg,None)
+    train_model(model, swa_model, cfg)
 
 
 #####################################################################
-#                         模型评估与融合
+#                         模型评估、模型融合、模型测试
 #####################################################################
-
-configs_path = model_dir+"all_configs.json"
-def save_config(filepath, cfg):
-    configs = {}
-    if os.path.exists(configs_path): configs = json.loads(open(configs_path,"r",encoding="utf8").read())
-    configs[filepath] = cfg
-    open(configs_path,"w",encoding="utf8").write(json.dumps(configs, indent=2, ensure_ascii=False))
 
 evaluate_path = model_dir + "y_pred.pkl"
 def evaluate_models():
@@ -853,6 +805,7 @@ def evaluate_models():
     num_clfs = len(all_cfgs)
 
     for weight, cfg in all_cfgs.items():
+        K.clear_session()
         model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg   
         data = load_data(dtype, input_length, w2v_length)
         train_x, train_y, test_x, test_y = split_data(data)
@@ -863,100 +816,8 @@ def evaluate_models():
     train_y_preds,test_y_preds = np.array(train_y_preds),np.array(test_y_preds)
     pd.to_pickle([train_y_preds,train_y,test_y_preds,test_y],evaluate_path)
 
-def find_out_combine_mean(use_combine=False):
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(evaluate_path)
-    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
-    num_clfs = len(all_cfgs)
-    combine_path = model_dir + "combine"+time.strftime("_%m-%d %H-%M-%S")+".txt"
-    with open(combine_path, "w", encoding="utf8") as log:
-        combines = []
-        max_clfs = min(3,num_clfs) if use_combine else 1
-        for i in range(1,max_clfs+1):
-            combines.extend([list(c) for c in combinations(range(num_clfs), i)])
-
-        for index, weight in enumerate(list(all_cfgs)):
-            log.write(f"[{index}]\t{weight}\n")
-        log.write("\n")
-
-        for cb in combines:
-            test_y_pred = test_y_preds[cb].mean(axis=0)     # 选择模型组合的结果进行平均
-            test_log = r_f1_thresh(test_y_pred, test_y, step = 10)
-            print(cb," \t",test_log)
-            log.write("\t".join([str(cb),"\t".join(map(str,test_log))])+"\n")
-
-    lines = open(combine_path,'r',encoding='utf8').readlines()
-    lines = [line.strip() for line in lines]
-    for i in range(len(lines)//2+1):
-        if 2*i+1<len(lines):
-            print(lines[2*i]+" xxx "+lines[2*i+1])
-        else:
-            print(lines[2*i])
-
-def get_error_sample():
-    train_y_preds,train_y,test_y_preds,test_y = pd.read_pickle(evaluate_path)
-    all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
-    for model_path in all_cfgs.keys():
-        index = list(all_cfgs).index(model_path)
-        r,f1,thresh = r_f1_thresh(test_y_preds[index], test_y)
-        error_id = (test_y_preds[index]>thresh) != test_y
-        data = open(train_file, 'r', encoding="utf8").readlines()
-        train, test = train_test_split(data, test_size=test_size, random_state=random_state)
-        error_sample = [test[i] for i in range(len(error_id)) if error_id[i]]
-        print(f"{model_path} error rate: {len(error_sample)}/{len(test_y)}")
-        os.makedirs(model_dir+"error_sample", exist_ok=True)
-        open(model_dir+"error_sample/"+model_path.split("/")[-1].split(".")[0]+".csv",'w',encoding="utf8").writelines(error_sample)
 
 blending_path = model_dir + "blending_gdbm.pkl"
-def tryout_blending():
-    """ 根据配置文件和验证集的值计算融合模型 """
-    train_y_preds,train_y,org_valid_preds,org_valid_y = pd.read_pickle(model_dir + "y_pred.pkl")
-    # 选择验证集上top10的模型
-    topK = 10
-    perform_on_valid = np.array([r_f1_thresh(y_pred, org_valid_y) for y_pred in org_valid_preds],
-        dtype=[("r",np.float),("f1",np.float),("thresh",np.float)])
-    topK_idx = np.argsort(perform_on_valid, axis=0, order="r")[-topK:]
-
-    train_y_preds = train_y_preds[topK_idx].T
-    org_valid_preds = org_valid_preds[topK_idx].T
-
-    clf_list = [LogisticRegression(),
-                LogisticRegressionCV(),
-                GradientBoostingClassifier(learning_rate=0.02, subsample=0.5, max_depth=6, n_estimators=30),]
-
-    '''融合使用的模型'''
-    groups = 20
-    test_size = 0.5
-    test_values = {}
-    for clf in clf_list:
-        print(clf)
-        test_values[clf] = [[] for _ in range(groups)]
-        for group in range(groups):
-            valid_y_preds, test_y_preds, valid_y, test_y = train_test_split(org_valid_preds, org_valid_y, test_size=test_size, random_state=group)
-            clf.fit(valid_y_preds, valid_y)
-            print("group", group)
-            train_y_preds_blend = clf.predict_proba(train_y_preds)[:,1]
-            r,f1,train_thresh = r_f1_thresh(train_y_preds_blend, train_y)
-            print("train", r,f1,train_thresh)
-
-            valid_y_preds_blend = clf.predict_proba(valid_y_preds)[:,1]
-            r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
-            print("valid", r,f1,valid_thresh)
-
-            vs = []
-            test_y_preds_blend = clf.predict_proba(test_y_preds)[:,1]
-            vs.extend( [f1_score(test_y_preds_blend>train_thresh, test_y),
-                f1_score(test_y_preds_blend>valid_thresh, test_y),
-                f1_score(test_y_preds_blend>(train_thresh+valid_thresh)/2, test_y)])
-
-            test_y_preds_blend = (test_y_preds_blend - test_y_preds_blend.min()) / (test_y_preds_blend.max() - test_y_preds_blend.min())
-            vs.extend( [f1_score(test_y_preds_blend>train_thresh, test_y),
-                f1_score(test_y_preds_blend>valid_thresh, test_y),
-                f1_score(test_y_preds_blend>(train_thresh+valid_thresh)/2, test_y)])
-            print("test", vs)
-            test_values[clf][group].append(vs)
-        test_values[clf] = np.array(test_values[clf])
-        print("mean test performance: ", test_values[clf].mean(axis=0))
-
 def train_blending():
     """ 根据配置文件和验证集的值计算融合模型 """
     train_y_preds,train_y,valid_y_preds,valid_y = pd.read_pickle(evaluate_path)
@@ -974,14 +835,9 @@ def train_blending():
     r,f1,valid_thresh = r_f1_thresh(valid_y_preds_blend, valid_y)
     pd.to_pickle(((train_thresh+valid_thresh)/2,clf), blending_path)
 
-#####################################################################
-#                         输出结果
-#####################################################################
-
 
 def result():
-    if online: global df1
-    else: df1 = pd.read_csv(train_file,sep="\t", header=None, names =["id","sent1","sent2","label"], encoding="utf8")
+    global df1
     all_cfgs = json.loads(open(configs_path,'r',encoding="utf8").read())
     num_clfs = len(all_cfgs)
     test_y_preds = []
@@ -1004,33 +860,20 @@ def result():
 
     df_output = pd.concat([df1["id"],pd.Series(result,name="label",dtype=np.int32)],axis=1)
     
-    print(df_output)
-    print(sum(result))
-    if online: topai(1,df_output)
+    topai(1,df_output)
 
 
-# for cfg in cfgs:
-#     model_type,dtype,input_length,ebed_type,w2v_length,n_hidden,n_epoch,patience = cfg
-#     save_config(model_dir + f"{model_type}_{dtype}.h5",cfg)
-
-indexes = indexes if online else range(7)
-# train_all_models(indexes)
-# evaluate_models()
-# find_out_combine_mean(True)
-# get_error_sample()
-tryout_blending()
-# train_blending()
-# result()
 
 
-'''
-* 对fastai模型进行融合
+# 文档第二步，训练多个不同的模型，index取值为0-6
+if False:
+    train_all_models(index=0)
 
-* 用新技术重新训练模型keras
-* 错误分析
+# 文档第三步，训练blending模型
+if False:
+    evaluate_models()
+    train_blending()
 
-* 用pai平台和传统方法试验
-* 将keras模型和传统方法(特征)进行融合
-
-* 新的自定义神经网络层
-'''
+# 文档第四步，测试blending模型
+if False:
+    result()
