@@ -25,3 +25,8 @@
 `pai_transform.py`试图参考fastai的ULMFiT方法，通过训练语言模型作为embedding输入，并针对当前分类任务更改网络结构以适应当前训练过程。
 `pai_old.py`试图参考quora分享，使用文本特征工程进行分类。
 
+
+> 模型来源siamese参考：https://blog.csdn.net/huowa9077/article/details/81082795
+> ESIM网络、Decomposable Attention来自Kaggle分享：https://www.kaggle.com/lamdang/dl-models
+> DSSM网络来自bird大神分享：https://openclub.alipay.com/read.php?tid=7480&fid=96
+> 感谢以上！
